@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Models (large binary files — download separately)
+cva/models/*.pt
+cva/models/*.onnx
+cva/models/*.pb
+
+# Keep scoring model (small JSON)
+!cva/models/scoring_model.json
+
+# Data / storage
+cva/data/
+cva/logs/
+
+# Environment secrets
+.env
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# InsightFace cache
+~/.insightface/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Ultralytics cache
+runs/

@@ -1,0 +1,62 @@
+# ─────────────────────────────────────────────────────────────────
+# CVA Demo Mode — Python Dependencies
+# Install: pip install -r requirements.txt
+# Python >= 3.10 recommended
+# ─────────────────────────────────────────────────────────────────
+
+# ── Core API & Server ─────────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+websockets>=12.0
+python-multipart>=0.0.9
+pydantic>=2.0.0
+
+# ── Video & Image Processing ──────────────────────────────────────
+opencv-python>=4.9.0
+numpy>=1.26.0
+Pillow>=10.0.0
+
+# ── MediaPipe (pose, face mesh, hands) ───────────────────────────
+mediapipe==0.10.14
+
+# ── ONNX Runtime — GPU preferred, CPU fallback ────────────────────
+# GPU (NVIDIA CUDA):  onnxruntime-gpu  ← installed
+# CPU fallback:       onnxruntime
+# DirectML (Windows): onnxruntime-directml
+# CoreML (macOS):     onnxruntime-silicon
+onnxruntime-gpu>=1.18.0
+
+# ── PyTorch with CUDA 12.1 (for YOLOv8 GPU inference) ─────────────
+# Install via: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# CPU fallback installed by default via ultralytics — replace with above for GPU
+
+# ── Identity Verification ─────────────────────────────────────────
+insightface>=0.7.3
+
+# ── OCR ──────────────────────────────────────────────────────────
+paddlepaddle>=2.6.0          # required by paddleocr
+paddleocr>=2.8.0
+
+# ── Name Matching ─────────────────────────────────────────────────
+rapidfuzz>=3.9.0
+
+# ── PDF Parsing ───────────────────────────────────────────────────
+PyMuPDF>=1.24.0
+
+# ── Audio Analysis ───────────────────────────────────────────────
+librosa>=0.10.2
+sounddevice>=0.4.6
+
+# ── Scoring & Explainability ──────────────────────────────────────
+xgboost>=2.0.0
+shap>=0.45.0
+scikit-learn>=1.4.0
+
+# ── Grooming (optional — comment out if not needed) ───────────────
+ultralytics>=8.2.0           # YOLOv8n
+
+# ── Feature Storage ───────────────────────────────────────────────
+# sqlite3 is built-in; no extra package needed
+
+# ── Utilities ────────────────────────────────────────────────────
+python-dotenv>=1.0.0
