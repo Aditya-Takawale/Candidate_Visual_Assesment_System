@@ -126,6 +126,12 @@ class ScoringEngine:
 
         final_score = float(np.clip(final_score, 0.0, 100.0))
 
+        # Presence gate: if gaze and identity are both near-zero the candidate is absent
+        presence = agg.gaze_score + agg.identity_score * 0.5
+        if presence < 0.2:
+            presence_multiplier = max(0.15, presence / 0.2)
+            final_score = final_score * presence_multiplier
+
         shap_breakdown = self._compute_shap(agg, module_scores)
 
         reason = self._build_reason(shap_breakdown)

@@ -10,6 +10,7 @@ import asyncio
 import base64
 import os
 import re
+import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -18,20 +19,21 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import Depends, FastAPI, Header, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from cva.config.settings import API_HOST, API_PORT, CORS_ORIGINS, DEFAULT_ROLE
+from cva.config.settings import API_HOST, API_PORT, API_KEY, CORS_ORIGINS, DEFAULT_ROLE, MAX_UPLOAD_BYTES
 from cva.common.models import ScoringResult, SystemHealth
 from cva.common.hardware import get_primary_backend
 from cva.common.logger import get_logger
 from cva.session.orchestrator import SessionOrchestrator
 
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
-_ocr_reader = None  # EasyOCR singleton — initialized on first upload
+_ocr_reader = None          # EasyOCR singleton — initialized on first upload
+_ocr_lock   = threading.Lock()  # guards singleton initialization
 
 
 @asynccontextmanager
@@ -86,6 +88,25 @@ class SessionResponse(BaseModel):
     hardware_backend: str
 
 
+class ReferenceUploadRequest(BaseModel):
+    """Typed model for reference image upload — enforces size cap."""
+    image_b64: str = Field(..., max_length=MAX_UPLOAD_BYTES)
+
+
+class AadhaarUploadRequest(BaseModel):
+    """Typed model for Aadhaar upload — enforces size cap."""
+    image_b64: str = Field(..., max_length=MAX_UPLOAD_BYTES)
+    manual_name: Optional[str] = Field(None, max_length=200)
+
+
+# ── Optional API-key authentication ──────────────────────────────────────────────────────────────────────────────
+
+def _require_api_key(x_api_key: Optional[str] = Header(None)) -> None:
+    """FastAPI dependency: enforces X-Api-Key header when CVA_API_KEY env var is set."""
+    if API_KEY and x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+
+
 # ── Callbacks (called from orchestrator background thread) ────────────────────
 
 def _on_score(result: ScoringResult) -> None:
@@ -136,7 +157,7 @@ def api_health():
 
 
 @app.post("/session/start", response_model=SessionResponse)
-def start_session(req: StartSessionRequest):
+def start_session(req: StartSessionRequest, _: None = Depends(_require_api_key)):
     global _session, _latest_score, _latest_health
     try:
         if _session is not None:
@@ -172,7 +193,7 @@ def start_session(req: StartSessionRequest):
 
 
 @app.post("/session/stop")
-def stop_session():
+def stop_session(_: None = Depends(_require_api_key)):
     global _session
     if _session is None:
         raise HTTPException(status_code=404, detail="No active session.")
@@ -183,60 +204,53 @@ def stop_session():
 
 
 @app.get("/session/score")
-def get_latest_score():
+def get_latest_score(_: None = Depends(_require_api_key)):
     if _latest_score is None:
         return {"status": "warming_up", "score": None}
     return {"status": "ok", "score": _latest_score}
 
 
 @app.get("/session/health")
-def get_session_health():
+def get_session_health(_: None = Depends(_require_api_key)):
     if _session is None:
         return {"status": "no_session"}
     return asdict(_session.health)
 
 
 @app.post("/session/reference")
-async def upload_reference(data: dict):
+async def upload_reference(data: ReferenceUploadRequest, _: None = Depends(_require_api_key)):
     """Legacy endpoint — kept for compatibility."""
     global _session
     if _session is None:
         raise HTTPException(status_code=404, detail="No active session.")
     try:
-        img_bytes = base64.b64decode(data["image_b64"])
+        img_bytes = base64.b64decode(data.image_b64)
         nparr = np.frombuffer(img_bytes, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        ok = _session.set_reference_image(frame)
+        if frame is None:
+            raise HTTPException(status_code=400, detail="Could not decode image.")
+        session_ref = _session
+        ok = await asyncio.to_thread(session_ref.set_reference_image, frame)
         return {"status": "reference_set" if ok else "no_face_detected"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/session/aadhaar")
-async def upload_aadhaar(data: dict):
-    """
-    Full Aadhaar card processing:
-      1. Decode the uploaded card image (base64)
-      2. Run PaddleOCR to extract the candidate name
-      3. Run InsightFace to extract face embedding as identity reference
-      4. Optionally accept manually entered name override
-    Body: { "image_b64": "<base64>", "manual_name": "<optional override>" }
-    Returns: { "status", "name_detected", "face_detected", "name_used" }
-    """
-    global _session
-    if _session is None:
-        raise HTTPException(status_code=404, detail="No active session.")
+def _get_ocr_reader():
+    """Thread-safe EasyOCR singleton initialization."""
+    global _ocr_reader
+    with _ocr_lock:
+        if _ocr_reader is None:
+            import easyocr
+            _ocr_reader = easyocr.Reader(["en", "hi"], gpu=True, verbose=False)
+    return _ocr_reader
 
-    try:
-        img_bytes = base64.b64decode(data["image_b64"])
-        nparr    = np.frombuffer(img_bytes, np.uint8)
-        card_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if card_img is None:
-            raise HTTPException(status_code=400, detail="Could not decode image.")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Image decode error: {e}")
 
-    result = {
+def _aadhaar_process_sync(card_img: np.ndarray, manual_name: str, session) -> dict:
+    """CPU-bound OCR + face detection — called via asyncio.to_thread to avoid blocking the event loop."""
+    result: dict = {
         "status": "ok",
         "face_detected": False,
         "name_detected": None,
@@ -245,13 +259,9 @@ async def upload_aadhaar(data: dict):
     }
 
     # ── 1. OCR — extract name from ID card ──────────────────────────────
-    manual_name = data.get("manual_name", "").strip()
     ocr_name: Optional[str] = None
     try:
-        import easyocr
-        global _ocr_reader
-        if "_ocr_reader" not in globals() or _ocr_reader is None:
-            _ocr_reader = easyocr.Reader(["en", "hi"], gpu=True, verbose=False)
+        reader = _get_ocr_reader()
 
         # ── Image preprocessing for robust OCR ──
         proc = card_img.copy()
@@ -269,13 +279,13 @@ async def upload_aadhaar(data: dict):
         gray = cv2.filter2D(gray, -1, kernel)
 
         # Run EasyOCR with English + Hindi for Indian ID cards
-        ocr_results = _ocr_reader.readtext(gray, paragraph=False)
+        ocr_results = reader.readtext(gray, paragraph=False)
         # Keep text + confidence, sorted by vertical position (top to bottom)
         raw_lines = [(bbox, text.strip(), conf) for (bbox, text, conf) in ocr_results if text.strip()]
         raw_lines.sort(key=lambda x: x[0][0][1])  # sort by y-coordinate
         texts = [text for (_, text, conf) in raw_lines if conf > 0.25]
         result["ocr_texts"] = texts
-        logger.info(f"OCR texts ({len(texts)} lines): {texts}")
+        logger.info(f"OCR completed: {len(texts)} text lines found")
 
         # ── Strategy 1: Label-based detection ──
         # Indian IDs have "Name" / "नाम" / "नाम / Name" labels; the actual
@@ -299,7 +309,7 @@ async def upload_aadhaar(data: dict):
                     alpha_ratio = sum(1 for c in candidate if c.isalpha() or c == ' ') / max(len(candidate), 1)
                     if alpha_ratio > 0.8:
                         ocr_name = candidate
-                        logger.info(f"OCR name (same-line after label): '{ocr_name}'")
+                        logger.info("OCR name extracted (same-line label method)")
                         break
                 # Case 2: Name is on the next line
                 if i + 1 < len(texts):
@@ -307,7 +317,7 @@ async def upload_aadhaar(data: dict):
                     alpha_ratio = sum(1 for c in candidate if c.isalpha() or c == ' ') / max(len(candidate), 1)
                     if alpha_ratio > 0.7 and len(candidate) > 3:
                         ocr_name = candidate
-                        logger.info(f"OCR name (next line after '{t}'): '{ocr_name}'")
+                        logger.info("OCR name extracted (next-line label method)")
                         break
 
         # ── Strategy 2: Fallback heuristic if label-based failed ──
@@ -353,7 +363,7 @@ async def upload_aadhaar(data: dict):
                 # Must have 2+ words that look like names (capitalized or all-caps)
                 if len(words) >= 2:
                     ocr_name = clean
-                    logger.info(f"OCR name (fallback heuristic): '{ocr_name}'")
+                    logger.info("OCR name extracted (fallback heuristic)")
                     break
 
         if not ocr_name:
@@ -369,20 +379,23 @@ async def upload_aadhaar(data: dict):
     result["name_used"] = name_to_use
 
     # ── 2. Face extraction — set as identity reference ────────────────────
-    # Detect face on the full card; if face is too small, upscale progressively
+    # Try original size first, then progressively larger upscales with lower threshold
     h, w = card_img.shape[:2]
     face_ok = False
 
-    # Try original size first, then 2x and 3x upscale
-    for scale_label, scale in [("original", 1), ("2x", 2), ("3x", 3)]:
-        if scale == 1:
-            img = card_img
-        else:
-            img = cv2.resize(card_img, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+    for scale_label, scale, thresh in [
+        ("original", 1, 0.5),
+        ("2x",       2, 0.4),
+        ("3x",       3, 0.3),
+        ("4x",       4, 0.25),
+    ]:
+        img = card_img if scale == 1 else cv2.resize(
+            card_img, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC
+        )
         try:
-            face_ok = _session.set_reference_image(img)
+            face_ok = session.set_reference_image(img, det_thresh=thresh)
             if face_ok:
-                logger.info(f"Face found in Aadhaar card ({scale_label}, {img.shape[1]}x{img.shape[0]})")
+                logger.info(f"Face found in Aadhaar card ({scale_label}, {img.shape[1]}x{img.shape[0]}, thresh={thresh})")
                 break
         except Exception as e:
             logger.debug(f"Face detection failed at {scale_label}: {e}")
@@ -392,13 +405,46 @@ async def upload_aadhaar(data: dict):
         result["status"] = "face_not_found"
         logger.warning("No face detected in Aadhaar card image.")
 
-    # ── 3. Set candidate name for name-match red flag ─────────────────────
-    if name_to_use:
-        _session.set_candidate_names(
-            aadhaar_name=name_to_use,
-            cv_name=name_to_use,   # same until CV name is provided separately
-        )
-        logger.info(f"Aadhaar name set: '{name_to_use}'")
+    return result
+
+
+@app.post("/session/aadhaar")
+async def upload_aadhaar(data: AadhaarUploadRequest, _: None = Depends(_require_api_key)):
+    """
+    Full Aadhaar card processing:
+      1. Decode the uploaded card image (base64)
+      2. Run EasyOCR to extract the candidate name (non-blocking)
+      3. Run InsightFace to extract face embedding as identity reference (non-blocking)
+      4. Optionally accept manually entered name override
+    Body: { "image_b64": "<base64>", "manual_name": "<optional override>" }
+    Returns: { "status", "name_detected", "face_detected", "name_used" }
+    """
+    global _session
+    if _session is None:
+        raise HTTPException(status_code=404, detail="No active session.")
+
+    try:
+        img_bytes = base64.b64decode(data.image_b64)
+        nparr    = np.frombuffer(img_bytes, np.uint8)
+        card_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if card_img is None:
+            raise HTTPException(status_code=400, detail="Could not decode image.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Image decode error: {e}")
+
+    manual_name = (data.manual_name or "").strip()
+    session_ref = _session  # capture reference before entering thread
+
+    # Heavy: OCR + face detection → run in thread pool (non-blocking)
+    result = await asyncio.to_thread(_aadhaar_process_sync, card_img, manual_name, session_ref)
+
+    # Apply name to session (fast, back in async context)
+    name_to_use = result.get("name_used")
+    if name_to_use and _session is not None:
+        _session.set_candidate_names(aadhaar_name=name_to_use, cv_name=name_to_use)
+        logger.info("Aadhaar document processed — names set for session.")
 
     return result
 
@@ -453,9 +499,11 @@ def _annotate_frame(frame: np.ndarray) -> np.ndarray:
 
 
 async def _mjpeg_generator():
+    _cam = _get_capture()
     while True:
-        cap = _get_capture()
-        if cap is None:
+        if _cam is None or not _cam.is_opened:
+            _cam = _get_capture()
+        if _cam is None:
             # Send a black placeholder frame
             from cva.config.settings import FRAME_WIDTH, FRAME_HEIGHT
             blank = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
@@ -467,7 +515,7 @@ async def _mjpeg_generator():
             await asyncio.sleep(0.5)
             continue
 
-        ret, frame = cap.read()
+        ret, frame = _cam.read()
         if not ret:
             await asyncio.sleep(0.05)
             continue

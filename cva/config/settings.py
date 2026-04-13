@@ -6,7 +6,7 @@ All thresholds, paths, and flags are config-driven. Never hardcoded in modules.
 from __future__ import annotations
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 # ─────────────────────────────────────────────
 # MODE
@@ -39,7 +39,7 @@ BRIGHTNESS_MAX = 220            # Above this = overexposed
 # ─────────────────────────────────────────────
 # SMART SCHEDULER INTERVALS (seconds)
 # ─────────────────────────────────────────────
-IDENTITY_INTERVAL = 7           # Run identity check every N seconds (relaxed for CPU)
+IDENTITY_INTERVAL = 2           # Run identity check every N seconds (more responsive in real-time mode)
 BODY_LANGUAGE_INTERVAL = 0      # Continuous (every frame)
 FIRST_IMPRESSION_DURATION = 300 # Only during first N seconds of session
 GROOMING_INTERVAL = 15          # Run grooming every N seconds (relaxed for CPU)
@@ -117,7 +117,12 @@ SQLITE_DB_PATH = DATA_DIR / "cva_features.db"
 # ─────────────────────────────────────────────
 API_HOST = os.getenv("CVA_API_HOST", "127.0.0.1")
 API_PORT = int(os.getenv("CVA_API_PORT", "8000"))
-CORS_ORIGINS = ["*"]
+_cors_raw = os.getenv("CVA_CORS_ORIGINS", "*")
+CORS_ORIGINS: list = [o.strip() for o in _cors_raw.split(",")]
+# Set CVA_API_KEY env var to require auth on all session endpoints (None = open/demo)
+API_KEY: Optional[str] = os.getenv("CVA_API_KEY") or None
+# Maximum base64 payload accepted on upload endpoints (~10 MB image → ~13.4 MB base64)
+MAX_UPLOAD_BYTES: int = int(os.getenv("CVA_MAX_UPLOAD_BYTES", str(14 * 1024 * 1024)))
 
 # ─────────────────────────────────────────────
 # PRODUCTION STUBS (design only — not active in demo)

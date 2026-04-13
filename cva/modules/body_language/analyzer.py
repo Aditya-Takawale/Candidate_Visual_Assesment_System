@@ -87,9 +87,12 @@ class BodyLanguageAnalyzer:
         now = time.time()
 
         if self._mock:
-            features.gaze_on_camera = True
-            features.posture_angle_deg = 5.0
-            features.fidget_score = 0.05
+            # Mock mode: MediaPipe not installed — cannot verify presence; conservative defaults
+            features.face_in_frame = False
+            features.gaze_on_camera = False
+            features.posture_angle_deg = 0.0
+            features.posture_slouch = False
+            features.fidget_score = 0.0
             features.emotion = "neutral"
             return features
 
@@ -100,6 +103,18 @@ class BodyLanguageAnalyzer:
 
         # Single FaceMesh pass for gaze + posture (replaces Holistic + FaceMesh)
         face_result = self._face_mesh_model.process(rgb)
+        face_found = bool(face_result.multi_face_landmarks)
+        features.face_in_frame = face_found
+
+        if not face_found:
+            # No face detected — penalize all presence-dependent signals
+            features.gaze_on_camera = False
+            features.posture_angle_deg = 45.0   # absence treated as severe deviation
+            features.posture_slouch = True
+            self._update_gaze_timer(False, now, features)
+            # Still compute frame motion (fidget) — movement possible even if face unseen
+            features = self._compute_fidget_fast(small, features)
+            return features
 
         features = self._compute_posture_from_face(face_result, h, w, features, now)
         features = self._compute_gaze(face_result, w, features, now)

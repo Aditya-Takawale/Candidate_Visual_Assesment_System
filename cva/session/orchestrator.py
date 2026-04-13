@@ -80,7 +80,7 @@ class SessionOrchestrator:
         on_score: Optional[Callable[[ScoringResult], None]] = None,
         on_health: Optional[Callable[[SystemHealth], None]] = None,
     ):
-        self.session_id = session_id or str(uuid.uuid4())[:8]
+        self.session_id = session_id or str(uuid.uuid4())
         self.candidate_id = candidate_id or "candidate_001"
         self._role = role
         self._on_score = on_score
@@ -131,8 +131,8 @@ class SessionOrchestrator:
             self._thread.join(timeout=5)
         logger.info(f"Session '{self.session_id}' stopped.")
 
-    def set_reference_image(self, frame) -> bool:
-        return self._identity.set_reference(frame)
+    def set_reference_image(self, frame, det_thresh: float = 0.5) -> bool:
+        return self._identity.set_reference(frame, det_thresh=det_thresh)
 
     def set_candidate_names(self, aadhaar_name: str, cv_name: str) -> None:
         self._identity._reference_name = aadhaar_name
@@ -143,11 +143,24 @@ class SessionOrchestrator:
     # ──────────────────────────────────────────
 
     def _process_loop(self) -> None:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor
 
         pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="cva-mod")
-        # Cache last features so skipped frames still have recent data
-        _last_features = FrameFeatures(timestamp=0.0, frame_id=0)
+
+        # Define module runners once — not inside the while loop
+        def _run_identity(f, feat):
+            feat = self._identity.process_frame(f, feat)
+            name_flag = self._identity.check_name_match()
+            return feat, name_flag
+
+        def _run_body_language(f, feat):
+            return self._body_language.process_frame(f, feat)
+
+        def _run_first_impression(f, feat):
+            return self._first_impression.process_frame(f, feat)
+
+        def _run_grooming(f, feat):
+            return self._grooming.process_frame(f, feat)
 
         while self._running:
             try:
@@ -176,20 +189,6 @@ class SessionOrchestrator:
             futures = {}
 
             # ── Submit modules in parallel ────────────
-            def _run_identity(f, feat):
-                feat = self._identity.process_frame(f, feat)
-                name_flag = self._identity.check_name_match()
-                return feat, name_flag
-
-            def _run_body_language(f, feat):
-                return self._body_language.process_frame(f, feat)
-
-            def _run_first_impression(f, feat):
-                return self._first_impression.process_frame(f, feat)
-
-            def _run_grooming(f, feat):
-                return self._grooming.process_frame(f, feat)
-
             if self._scheduler.should_run("identity", frame_id, queue_depth):
                 f_id = FrameFeatures(timestamp=timestamp, frame_id=frame_id)
                 futures["identity"] = pool.submit(_run_identity, frame, f_id)
@@ -230,6 +229,7 @@ class SessionOrchestrator:
                             )
                     elif module == "body_language":
                         mod_feat = result
+                        features.face_in_frame = mod_feat.face_in_frame
                         features.gaze_on_camera = mod_feat.gaze_on_camera
                         features.gaze_off_seconds = mod_feat.gaze_off_seconds
                         features.posture_angle_deg = mod_feat.posture_angle_deg
@@ -249,8 +249,6 @@ class SessionOrchestrator:
                 except Exception as e:
                     logger.warning(f"{module} module error: {e}")
                     self._scheduler.mark_degraded(module)
-
-            _last_features = features
 
             # ── Aggregate ─────────────────────────────
             self._aggregator.ingest(features)

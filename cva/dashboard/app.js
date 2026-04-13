@@ -6,6 +6,16 @@ const API_BASE = window.location.origin;
 const WS_URL   = (window.location.protocol === "https:" ? "wss://" : "ws://")
                + window.location.host + "/ws";
 
+// ── HTML escape helper (prevents XSS from server-controlled strings) ────────────
+function escHtml(str) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 // ── State ──────────────────────────────────────────────────────────────────
 let state = {
   sessionId: null,
@@ -317,7 +327,7 @@ function renderShap(shap) {
       return `
         <div>
           <div class="flex justify-between text-xs mb-1">
-            <span class="text-slate-400 capitalize">${k.replace(/_/g,' ')}</span>
+            <span class="text-slate-400 capitalize">${escHtml(k).replace(/_/g,' ')}</span>
             <span style="color:${colour}" class="font-mono">${sign}${v.toFixed(1)}%</span>
           </div>
           <div class="h-1.5 bg-slate-700 rounded-full overflow-hidden">
@@ -339,10 +349,10 @@ function renderRedFlags(flags) {
     return `
       <div class="flag-enter bg-slate-700/50 rounded-lg p-2.5 text-xs border border-slate-600/50">
         <div class="flex justify-between items-start">
-          <span class="${colour} font-semibold capitalize">[${f.module}] ${f.severity}</span>
-          <span class="text-slate-500 font-mono">${ts}</span>
+          <span class="${colour} font-semibold capitalize">[${escHtml(f.module)}] ${escHtml(f.severity)}</span>
+          <span class="text-slate-500 font-mono">${escHtml(ts)}</span>
         </div>
-        <p class="text-slate-300 mt-0.5">${f.reason}</p>
+        <p class="text-slate-300 mt-0.5">${escHtml(f.reason)}</p>
       </div>`;
   }).join("");
 }
@@ -366,7 +376,7 @@ function renderHealth(health) {
   ];
   container.innerHTML = all.map(({ m, cls, label }) => `
     <span class="${cls} rounded-full px-2.5 py-0.5 text-xs capitalize">
-      ${m.replace(/_/g,' ')} · ${label}
+      ${escHtml(m).replace(/_/g,' ')} · ${escHtml(label)}
     </span>`).join("");
 }
 
@@ -540,6 +550,11 @@ document.getElementById("btn-upload-aadhaar").addEventListener("click", async ()
       body: JSON.stringify({ candidate_id: "demo_candidate", role: "developer" }),
     });
     const startData = await startRes.json();
+    if (!startRes.ok) {
+      aadhaarStatus(`Error starting session: ${startData.detail || startRes.statusText}`, "error");
+      document.getElementById("btn-upload-aadhaar").disabled = false;
+      return;
+    }
     state.sessionId = startData.session_id;
 
     // Now upload the Aadhaar card
@@ -568,14 +583,19 @@ document.getElementById("btn-upload-aadhaar").addEventListener("click", async ()
     const nameUsed = data.name_used || "Candidate";
     const faceOk   = data.face_detected;
 
-    if (faceOk || data.name_detected) {
+    if (faceOk || data.name_detected || data.name_used) {
       _verifiedName = nameUsed;
 
       // Show welcome step
       document.getElementById("welcome-name-display").textContent = `Welcome, ${nameUsed}!`;
       document.getElementById("welcome-detail").textContent =
-        faceOk ? "Your identity document has been verified. Face and name extracted successfully."
-               : `Name detected: ${nameUsed}. Face not found — manual verification may be needed.`;
+        faceOk && data.name_detected
+          ? "Your identity document has been verified. Face and name extracted successfully."
+          : faceOk
+          ? `Face detected. Name used: ${escHtml(nameUsed)}.`
+          : data.name_detected
+          ? `Name extracted: ${escHtml(nameUsed)}. Face not found — manual verification may be needed.`
+          : `Using manually entered name: ${escHtml(nameUsed)}. Face not found in document.`;
       document.getElementById("welcome-heading").textContent =
         faceOk ? "Identity Verified" : "Document Scanned";
 

@@ -24,7 +24,7 @@ mediapipe==0.10.14
 # CPU fallback:       onnxruntime
 # DirectML (Windows): onnxruntime-directml
 # CoreML (macOS):     onnxruntime-silicon
-onnxruntime-gpu>=1.18.0
+onnxruntime-gpu==1.19.2
 
 # ── PyTorch with CUDA 12.1 (for YOLOv8 GPU inference) ─────────────
 # Install via: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
@@ -34,8 +34,7 @@ onnxruntime-gpu>=1.18.0
 insightface>=0.7.3
 
 # ── OCR ──────────────────────────────────────────────────────────
-paddlepaddle>=2.6.0          # required by paddleocr
-paddleocr>=2.8.0
+easyocr>=1.7.0
 
 # ── Name Matching ─────────────────────────────────────────────────
 rapidfuzz>=3.9.0

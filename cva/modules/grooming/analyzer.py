@@ -102,7 +102,7 @@ class GroomingAnalyzer:
                     detected_classes.append(cls_name)
 
         if not detected_classes:
-            return ("unknown", 0.8)
+            return ("undetected", 0.5)  # no detections — neutral, no credit awarded
 
         for cls in detected_classes:
             if any(ethnic in cls for ethnic in ETHNIC_WEAR_CLASSES):
@@ -112,7 +112,19 @@ class GroomingAnalyzer:
             if any(casual in cls for casual in CASUAL_WEAR_CLASSES):
                 return (cls, 0.3)
 
-        return ("formal", 0.9)
+        # COCO "tie" is a strong formal indicator
+        if "tie" in detected_classes:
+            return ("formal", 0.95)
+
+        # Only generic COCO objects detected (person, chair, etc.) — cannot determine attire
+        clothing_keywords = set(CASUAL_WEAR_CLASSES + ETHNIC_WEAR_CLASSES + ["tie", "suit", "jacket", "blazer", "shirt"])
+        has_clothing = any(
+            any(kw in cls for kw in clothing_keywords) for cls in detected_classes
+        )
+        if not has_clothing:
+            return ("undetected", 0.55)  # generic COCO detections — cannot determine attire
+
+        return ("formal", 0.85)
 
     def get_red_flags(self, features: FrameFeatures) -> List[RedFlag]:
         flags = []

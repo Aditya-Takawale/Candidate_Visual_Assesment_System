@@ -42,14 +42,14 @@ class MultiFrameAggregator:
         self._agg = AggregatedFeatures(session_id=session_id, candidate_id=candidate_id)
 
         self._ema = {
-            "identity_score": 0.5,       # Start neutral, not perfect
+            "identity_score": 0.5,       # Start neutral until verified
             "gaze_score": 0.5,
-            "posture_score": 0.8,
+            "posture_score": 0.5,        # Neutral until calibrated — no free credit
             "fidget_score": 0.0,
             "smile_ratio": 0.0,
-            "speech_energy_score": 0.6,  # Start generous — silence shouldn't tank score
-            "grooming_score": 0.6,       # Start generous
-            "punctuality_score": 1.0,
+            "speech_energy_score": 0.3,  # Must earn via actual speech
+            "grooming_score": 0.5,       # Neutral until assessed
+            "punctuality_score": 1.0,    # On-time unless proven late
         }
 
         self._slouch_start: float = 0.0
@@ -58,8 +58,9 @@ class MultiFrameAggregator:
         self._gaze_flagged = False
         self._no_smile_frames: int = 0
         self._low_speech_frames: int = 0
-        self._fidget_frames: int = 0
         self._low_identity_frames: int = 0
+        self._fidget_frames: int = 0
+        self._no_face_frames: int = 0
 
         # Persistent red flags — accumulate across frames, deduplicated by module+reason
         self._red_flags: List[RedFlag] = []
@@ -71,8 +72,8 @@ class MultiFrameAggregator:
         self._update_ema(features)
         self._check_temporal_rules(features)
 
-    def _ema_update(self, key: str, new_value: float) -> float:
-        self._ema[key] = EMA_ALPHA * new_value + (1 - EMA_ALPHA) * self._ema[key]
+    def _ema_update(self, key: str, new_value: float, alpha: float = EMA_ALPHA) -> float:
+        self._ema[key] = alpha * new_value + (1 - alpha) * self._ema[key]
         return self._ema[key]
 
     def _add_flag(self, module: str, reason: str, severity: RedFlagSeverity, confidence: float) -> None:
@@ -88,37 +89,50 @@ class MultiFrameAggregator:
     def _remap_identity(raw_sim: float) -> float:
         """Remap cosine similarity to a fairer identity score.
         Aadhaar-vs-webcam typically gives 0.30-0.55 due to print quality,
-        lighting, and angle differences. This curve maps:
-          0.25 → 0.40,  0.35 → 0.70,  0.45 → 0.85,  0.55+ → 0.95+
+        lighting, and angle differences. Actual curve:
+          0.25 -> 0.45,  0.35 -> 0.59,  0.45 -> 0.73,  0.55 -> 0.87, 0.60+ -> 0.90+
         """
+        if raw_sim >= 0.70:
+            return min(1.0, 0.95 + (raw_sim - 0.70) * 0.20)
         if raw_sim >= 0.55:
-            return min(1.0, 0.90 + (raw_sim - 0.55) * 0.5)
-        if raw_sim >= 0.30:
-            return 0.40 + (raw_sim - 0.25) * 2.0  # steep ramp in the typical range
+            return min(0.95, 0.87 + (raw_sim - 0.55) * 0.60)
+        if raw_sim >= 0.25:
+            return 0.45 + (raw_sim - 0.25) * 1.40
         return max(0.1, raw_sim * 1.5)
 
     def _update_ema(self, f: FrameFeatures) -> None:
+        # ── Identity ──────────────────────────────────────────────────────
         if f.face_cosine_similarity is not None:
             identity_score = self._remap_identity(f.face_cosine_similarity)
-            self._ema_update("identity_score", identity_score)
-        elif f.face_detected is False:
-            # Don't slam to 0 on missed frames — decay gently
-            self._ema_update("identity_score", max(0.5, self._ema["identity_score"] * 0.98))
+            # Identity should converge faster than other signals once a face is matched.
+            self._ema_update("identity_score", identity_score, alpha=0.45)
+        elif not f.face_in_frame:
+            # Face completely absent — drive identity toward 0
+            self._ema_update("identity_score", 0.0)
+        elif not f.face_detected:
+            # Identity module skipped this frame — slow decay, no artificial floor
+            self._ema_update("identity_score", self._ema["identity_score"] * 0.95)
 
-        gaze_val = 1.0 if f.gaze_on_camera else max(0.0, 1.0 - f.gaze_off_seconds / GAZE_OFF_CAMERA_THRESHOLD_SEC)
-        self._ema_update("gaze_score", gaze_val)
+        # ── Body Language — only meaningful when face is visible ───────────
+        if not f.face_in_frame:
+            # Nobody present: drive all presence signals toward 0
+            self._ema_update("gaze_score", 0.0)
+            self._ema_update("posture_score", 0.0)
+        else:
+            gaze_val = 1.0 if f.gaze_on_camera else max(0.0, 1.0 - f.gaze_off_seconds / GAZE_OFF_CAMERA_THRESHOLD_SEC)
+            self._ema_update("gaze_score", gaze_val)
 
-        posture_val = max(0.0, 1.0 - f.posture_angle_deg / (SLOUCH_ANGLE_THRESHOLD_DEG * 2))
-        self._ema_update("posture_score", posture_val)
+            posture_val = max(0.0, 1.0 - f.posture_angle_deg / (SLOUCH_ANGLE_THRESHOLD_DEG * 2))
+            self._ema_update("posture_score", posture_val)
 
         self._ema_update("fidget_score", f.fidget_score)
 
         smile_val = 1.0 if f.smile_detected else 0.0
         self._ema_update("smile_ratio", smile_val)
 
-        # Speech: if mic is dead (RMS near zero), don't penalise — use neutral
+        # Speech: dead mic (RMS ~0) → low neutral; actual audio → compute real energy
         if f.speech_rms < 0.001:
-            speech_val = 0.6   # neutral — mic likely not working
+            speech_val = 0.4   # low neutral — mic silent, no credit awarded
         else:
             speech_val = min(1.0, f.speech_rms / max(0.001, SPEECH_RMS_THRESHOLD * 2))
         self._ema_update("speech_energy_score", speech_val)
@@ -208,6 +222,18 @@ class MultiFrameAggregator:
                 )
         else:
             self._low_identity_frames = max(0, self._low_identity_frames - 1)
+
+        # ── No face in frame ──────────────────────────────────────────────
+        if not f.face_in_frame:
+            self._no_face_frames += 1
+            if self._no_face_frames == 12:  # ~4 seconds at 3 fps
+                self._add_flag(
+                    "identity",
+                    "Candidate not visible in frame — possible absence or camera issue",
+                    RedFlagSeverity.HIGH, 0.95,
+                )
+        else:
+            self._no_face_frames = max(0, self._no_face_frames - 3)
 
         # ── Grooming / casual wear ────────────────────────────────────
         if f.attire_class and f.attire_class.lower() in ["t-shirt", "hoodie", "tank-top", "shorts", "casual"]:

@@ -44,7 +44,8 @@ class FrameFeatures:
     identity_verified: bool = False
 
     # Body Language
-    gaze_on_camera: bool = True
+    face_in_frame: bool = False        # True only when MediaPipe detects a face this frame
+    gaze_on_camera: bool = False       # Fail-safe: assume not looking until proven otherwise
     gaze_off_seconds: float = 0.0
     posture_angle_deg: float = 0.0
     posture_slouch: bool = False

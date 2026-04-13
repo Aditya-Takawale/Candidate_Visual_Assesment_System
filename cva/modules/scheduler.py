@@ -48,7 +48,8 @@ class ModuleScheduler:
 
         if module == "identity":
             if backpressure:
-                pass
+                self._status["identity"] = ModuleStatus.SKIPPED
+                return False
             should = (now - self._last_identity_run) >= IDENTITY_INTERVAL
             if should:
                 self._last_identity_run = now

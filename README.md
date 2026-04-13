@@ -153,3 +153,7 @@ See `CVA_Production_Architecture.docx` for the full production design:
 - No Aadhaar data is stored in demo mode (`STORAGE_BACKEND=memory`)
 - Face embeddings are held in-process memory only; not persisted
 - For production: AES-256 at rest, TLS 1.3 in transit, Aadhaar last-4 only
+
+
+
+c:/Developer/Candidate_Visual_Assesment/.venv/Scripts/python.exe run.py
