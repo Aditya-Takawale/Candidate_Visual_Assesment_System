@@ -28,10 +28,10 @@ for _d in (MODELS_DIR, LOGS_DIR, DATA_DIR):
 # VIDEO INGESTION
 # ─────────────────────────────────────────────
 VIDEO_SOURCE = int(os.getenv("CVA_VIDEO_SOURCE", "0"))   # 0 = webcam; path for file
-FRAME_WIDTH = 640
-FRAME_HEIGHT = 480
+FRAME_WIDTH = 480
+FRAME_HEIGHT = 360
 FPS_IDLE = 1
-FPS_ACTIVE = 3
+FPS_ACTIVE = 4
 BLUR_THRESHOLD = 5.0            # Laplacian variance — below this = blurry frame
 BRIGHTNESS_MIN = 20             # Mean pixel brightness below this = too dark
 BRIGHTNESS_MAX = 220            # Above this = overexposed
@@ -39,16 +39,16 @@ BRIGHTNESS_MAX = 220            # Above this = overexposed
 # ─────────────────────────────────────────────
 # SMART SCHEDULER INTERVALS (seconds)
 # ─────────────────────────────────────────────
-IDENTITY_INTERVAL = 3           # Run identity check every N seconds
+IDENTITY_INTERVAL = 7           # Run identity check every N seconds (relaxed for CPU)
 BODY_LANGUAGE_INTERVAL = 0      # Continuous (every frame)
 FIRST_IMPRESSION_DURATION = 300 # Only during first N seconds of session
-GROOMING_INTERVAL = 10          # Run grooming every N seconds (0 = disabled)
+GROOMING_INTERVAL = 15          # Run grooming every N seconds (relaxed for CPU)
 GROOMING_ENABLED = True
 
 # ─────────────────────────────────────────────
 # MULTI-FRAME AGGREGATION
 # ─────────────────────────────────────────────
-EMA_ALPHA = 0.3                 # Exponential moving average smoothing factor
+EMA_ALPHA = 0.15                # Smoothing factor (lower = smoother at low FPS)
 FRAME_BUFFER_SIZE = 10          # Number of frames to aggregate over
 WARMUP_FRAMES = 5               # Hold scoring until this many frames collected
 BASELINE_CALIBRATION_FRAMES = 5 * FPS_ACTIVE  # First N frames = baseline calibration
@@ -56,7 +56,7 @@ BASELINE_CALIBRATION_FRAMES = 5 * FPS_ACTIVE  # First N frames = baseline calibr
 # ─────────────────────────────────────────────
 # IDENTITY MODULE
 # ─────────────────────────────────────────────
-IDENTITY_COSINE_THRESHOLD = 0.6         # Below this = face mismatch red flag
+IDENTITY_COSINE_THRESHOLD = 0.40        # Below this = face mismatch red flag (relaxed for Aadhaar-vs-webcam)
 IDENTITY_MULTI_FRAME_COUNT = 5          # Average embeddings over N frames
 IDENTITY_LIVENESS_ENABLED = True
 FUZZY_MATCH_THRESHOLD = 80              # RapidFuzz score below this = name mismatch
@@ -91,18 +91,18 @@ CASUAL_WEAR_CLASSES = ["t-shirt", "hoodie", "tank-top", "shorts"]
 # ─────────────────────────────────────────────
 # SCORING ENGINE
 # ─────────────────────────────────────────────
-SCORING_INTERVAL_SEC = 5                # Recompute full score every N seconds
+SCORING_INTERVAL_SEC = 8                # Recompute score every N seconds (more frames at low FPS)
 MODULE_WEIGHTS = {
-    "identity": 0.30,
-    "body_language": 0.35,
+    "identity": 0.20,
+    "body_language": 0.40,
     "first_impression": 0.20,
-    "grooming": 0.15,
+    "grooming": 0.20,
 }
 # Role-based weight overrides
 ROLE_WEIGHTS = {
-    "developer": {"identity": 0.30, "body_language": 0.35, "first_impression": 0.15, "grooming": 0.20},
-    "sales":     {"identity": 0.25, "body_language": 0.30, "first_impression": 0.30, "grooming": 0.15},
-    "hr":        {"identity": 0.25, "body_language": 0.25, "first_impression": 0.30, "grooming": 0.20},
+    "developer": {"identity": 0.20, "body_language": 0.40, "first_impression": 0.15, "grooming": 0.25},
+    "sales":     {"identity": 0.15, "body_language": 0.30, "first_impression": 0.35, "grooming": 0.20},
+    "hr":        {"identity": 0.15, "body_language": 0.30, "first_impression": 0.30, "grooming": 0.25},
 }
 DEFAULT_ROLE = os.getenv("CVA_ROLE", "developer")
 
@@ -115,7 +115,7 @@ SQLITE_DB_PATH = DATA_DIR / "cva_features.db"
 # ─────────────────────────────────────────────
 # FASTAPI / DASHBOARD
 # ─────────────────────────────────────────────
-API_HOST = os.getenv("CVA_API_HOST", "0.0.0.0")
+API_HOST = os.getenv("CVA_API_HOST", "127.0.0.1")
 API_PORT = int(os.getenv("CVA_API_PORT", "8000"))
 CORS_ORIGINS = ["*"]
 

@@ -31,6 +31,40 @@ from cva.storage.feature_store import get_feature_store
 logger = get_logger(__name__)
 
 
+# ── Module singleton cache (loaded once, reused across sessions) ──
+_cached_identity: Optional[IdentityVerifier] = None
+_cached_body_language: Optional[BodyLanguageAnalyzer] = None
+_cached_grooming: Optional[GroomingAnalyzer] = None
+_cached_scorer: dict[str, ScoringEngine] = {}
+
+
+def _get_identity() -> IdentityVerifier:
+    global _cached_identity
+    if _cached_identity is None:
+        _cached_identity = IdentityVerifier()
+    return _cached_identity
+
+
+def _get_body_language() -> BodyLanguageAnalyzer:
+    global _cached_body_language
+    if _cached_body_language is None:
+        _cached_body_language = BodyLanguageAnalyzer()
+    return _cached_body_language
+
+
+def _get_grooming() -> GroomingAnalyzer:
+    global _cached_grooming
+    if _cached_grooming is None:
+        _cached_grooming = GroomingAnalyzer()
+    return _cached_grooming
+
+
+def _get_scorer(role: str) -> ScoringEngine:
+    if role not in _cached_scorer:
+        _cached_scorer[role] = ScoringEngine(role=role)
+    return _cached_scorer[role]
+
+
 class SessionOrchestrator:
     """
     Manages a single candidate assessment session end-to-end.
@@ -65,11 +99,12 @@ class SessionOrchestrator:
             session_id=self.session_id,
             candidate_id=self.candidate_id,
         )
-        self._identity = IdentityVerifier()
-        self._body_language = BodyLanguageAnalyzer()
+        # Reuse cached module instances (models loaded only once)
+        self._identity = _get_identity()
+        self._body_language = _get_body_language()
         self._first_impression = FirstImpressionAnalyzer(scheduled_start_time=scheduled_start)
-        self._grooming = GroomingAnalyzer()
-        self._scorer = ScoringEngine(role=role)
+        self._grooming = _get_grooming()
+        self._scorer = _get_scorer(role)
         self._store = get_feature_store()
 
         self._health = SystemHealth(hardware_backend=get_primary_backend())
@@ -108,65 +143,114 @@ class SessionOrchestrator:
     # ──────────────────────────────────────────
 
     def _process_loop(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="cva-mod")
+        # Cache last features so skipped frames still have recent data
+        _last_features = FrameFeatures(timestamp=0.0, frame_id=0)
+
         while self._running:
             try:
                 payload = self._frame_queue.get(timeout=0.1)
             except Empty:
                 continue
 
+            # ── Smart frame skipping: drop stale frames ──
+            queue_depth = self._frame_queue.qsize()
+            if queue_depth > 3:
+                # Skip to latest frame — discard stale ones
+                while not self._frame_queue.empty():
+                    try:
+                        payload = self._frame_queue.get_nowait()
+                    except Empty:
+                        break
+                queue_depth = 0
+
             frame = payload["frame"]
             frame_id = payload["frame_id"]
             timestamp = payload["timestamp"]
-            queue_depth = self._frame_queue.qsize()
 
             features = FrameFeatures(timestamp=timestamp, frame_id=frame_id)
             active = []
             skipped = []
+            futures = {}
 
-            # ── Identity ──────────────────────────────
+            # ── Submit modules in parallel ────────────
+            def _run_identity(f, feat):
+                feat = self._identity.process_frame(f, feat)
+                name_flag = self._identity.check_name_match()
+                return feat, name_flag
+
+            def _run_body_language(f, feat):
+                return self._body_language.process_frame(f, feat)
+
+            def _run_first_impression(f, feat):
+                return self._first_impression.process_frame(f, feat)
+
+            def _run_grooming(f, feat):
+                return self._grooming.process_frame(f, feat)
+
             if self._scheduler.should_run("identity", frame_id, queue_depth):
-                try:
-                    features = self._identity.process_frame(frame, features)
-                    name_flag = self._identity.check_name_match()
-                    active.append("identity")
-                except Exception as e:
-                    logger.warning(f"Identity module error: {e}")
-                    self._scheduler.mark_degraded("identity")
+                f_id = FrameFeatures(timestamp=timestamp, frame_id=frame_id)
+                futures["identity"] = pool.submit(_run_identity, frame, f_id)
             else:
                 skipped.append("identity")
 
-            # ── Body Language ─────────────────────────
             if self._scheduler.should_run("body_language", frame_id, queue_depth):
-                try:
-                    features = self._body_language.process_frame(frame, features)
-                    active.append("body_language")
-                except Exception as e:
-                    logger.warning(f"Body language module error: {e}")
-                    self._scheduler.mark_degraded("body_language")
+                f_bl = FrameFeatures(timestamp=timestamp, frame_id=frame_id)
+                futures["body_language"] = pool.submit(_run_body_language, frame, f_bl)
             else:
                 skipped.append("body_language")
 
-            # ── First Impression ──────────────────────
             if self._scheduler.should_run("first_impression", frame_id, queue_depth):
-                try:
-                    features = self._first_impression.process_frame(frame, features)
-                    active.append("first_impression")
-                except Exception as e:
-                    logger.warning(f"First impression module error: {e}")
-                    self._scheduler.mark_degraded("first_impression")
+                f_fi = FrameFeatures(timestamp=timestamp, frame_id=frame_id)
+                futures["first_impression"] = pool.submit(_run_first_impression, frame, f_fi)
             else:
                 skipped.append("first_impression")
 
-            # ── Grooming ──────────────────────────────
             if self._scheduler.should_run("grooming", frame_id, queue_depth):
-                try:
-                    features = self._grooming.process_frame(frame, features)
-                    active.append("grooming")
-                except Exception as e:
-                    logger.warning(f"Grooming module error: {e}")
-                    self._scheduler.mark_degraded("grooming")
+                f_gr = FrameFeatures(timestamp=timestamp, frame_id=frame_id)
+                futures["grooming"] = pool.submit(_run_grooming, frame, f_gr)
             else:
                 skipped.append("grooming")
+
+            # ── Collect results and merge into features ──
+            for module, future in futures.items():
+                try:
+                    result = future.result(timeout=2.0)
+                    if module == "identity":
+                        mod_feat, name_flag = result
+                        features.face_detected = mod_feat.face_detected
+                        features.face_cosine_similarity = mod_feat.face_cosine_similarity
+                        features.identity_verified = mod_feat.identity_verified
+                        if name_flag:
+                            self._aggregator._add_flag(
+                                name_flag.module, name_flag.reason,
+                                name_flag.severity, name_flag.confidence,
+                            )
+                    elif module == "body_language":
+                        mod_feat = result
+                        features.gaze_on_camera = mod_feat.gaze_on_camera
+                        features.gaze_off_seconds = mod_feat.gaze_off_seconds
+                        features.posture_angle_deg = mod_feat.posture_angle_deg
+                        features.posture_slouch = mod_feat.posture_slouch
+                        features.fidget_score = mod_feat.fidget_score
+                        features.emotion = mod_feat.emotion
+                    elif module == "first_impression":
+                        mod_feat = result
+                        features.smile_detected = mod_feat.smile_detected
+                        features.speech_rms = mod_feat.speech_rms
+                        features.speech_active = mod_feat.speech_active
+                    elif module == "grooming":
+                        mod_feat = result
+                        features.attire_class = mod_feat.attire_class
+                        features.grooming_score = mod_feat.grooming_score
+                    active.append(module)
+                except Exception as e:
+                    logger.warning(f"{module} module error: {e}")
+                    self._scheduler.mark_degraded(module)
+
+            _last_features = features
 
             # ── Aggregate ─────────────────────────────
             self._aggregator.ingest(features)
@@ -197,6 +281,8 @@ class SessionOrchestrator:
             self._health.warmup_remaining = max(0, WARMUP_FRAMES - agg.frame_count)
             if self._on_health:
                 self._on_health(self._health)
+
+        pool.shutdown(wait=False)
 
     def _update_fps(self, fps: float) -> None:
         self._measured_fps = fps

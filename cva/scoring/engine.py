@@ -49,9 +49,9 @@ def _rule_based_score(agg: AggregatedFeatures, weights: Dict[str, float]) -> Dic
         agg.emotion_score * 0.15
     )
     first_impression = (
-        agg.smile_ratio * 0.3 +
-        agg.speech_energy_score * 0.4 +
-        agg.punctuality_score * 0.3
+        agg.smile_ratio * 0.35 +
+        agg.speech_energy_score * 0.20 +
+        agg.punctuality_score * 0.45
     )
     return {
         "identity": float(np.clip(agg.identity_score, 0.0, 1.0)),
@@ -84,9 +84,9 @@ class ScoringEngine:
             return
         try:
             import xgboost as xgb
-            self._xgb_model = xgb.XGBClassifier()
+            self._xgb_model = xgb.XGBRegressor()
             self._xgb_model.load_model(str(model_path))
-            logger.info("XGBoost scoring model loaded.")
+            logger.info("XGBoost scoring model loaded (regressor).")
             try:
                 import shap
                 self._shap_explainer = shap.TreeExplainer(self._xgb_model)
@@ -105,21 +105,25 @@ class ScoringEngine:
 
         module_scores = _rule_based_score(agg, self._weights)
 
+        xgb_score = None
         if self._xgb_model is not None:
             try:
                 fv = _build_feature_vector(agg)
-                prob = float(self._xgb_model.predict_proba(fv)[0][1])
-                # Blend rule-based per-module scores with XGBoost holistic probability
-                # XGBoost calibrates the overall quality; per-module scores retain their relative values
-                blend = 0.6  # 60% rule-based (keeps module detail), 40% XGBoost calibration
-                for m in module_scores:
-                    module_scores[m] = blend * module_scores[m] + (1 - blend) * prob
+                xgb_score = float(np.clip(self._xgb_model.predict(fv)[0], 0, 100))
             except Exception as e:
                 logger.warning(f"XGBoost inference error: {e} — using rule-based scores.")
 
-        final_score = sum(
+        # Compute final score: XGBoost if available, else rule-based
+        rule_score = sum(
             module_scores.get(m, 0.5) * w for m, w in self._weights.items()
         ) * 100.0
+
+        if xgb_score is not None:
+            # Blend: 60% XGBoost (trained on penalties), 40% rule-based (smooth)
+            final_score = 0.60 * xgb_score + 0.40 * rule_score
+        else:
+            final_score = rule_score
+
         final_score = float(np.clip(final_score, 0.0, 100.0))
 
         shap_breakdown = self._compute_shap(agg, module_scores)

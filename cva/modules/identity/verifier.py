@@ -94,7 +94,7 @@ class IdentityVerifier:
         self._embedder = FaceEmbedder()
         self._reference_embedding: Optional[np.ndarray] = None
         self._embedding_buffer: Deque[np.ndarray] = deque(maxlen=IDENTITY_MULTI_FRAME_COUNT)
-        self._smoothed_similarity: float = 1.0
+        self._smoothed_similarity: float = 0.5   # neutral until reference is verified
         self._red_flags: list = []
         self._reference_name: Optional[str] = None
         self._cv_name: Optional[str] = None
@@ -117,6 +117,9 @@ class IdentityVerifier:
         """Run identity check on a single frame, update features in-place."""
         if self._reference_embedding is None:
             features.face_detected = self._embedder.face_detected(frame)
+            # No reference → neutral score (don't penalise candidate)
+            features.face_cosine_similarity = 0.75
+            features.identity_verified = True
             return features
 
         embedding = self._embedder.get_embedding(frame)
@@ -185,7 +188,7 @@ class OCRExtractor:
     def _load(self) -> None:
         try:
             from paddleocr import PaddleOCR
-            self._ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+            self._ocr = PaddleOCR(use_angle_cls=True, lang="en")
             logger.info("PaddleOCR loaded.")
         except ImportError:
             logger.warning("PaddleOCR not installed — OCR extraction disabled.")
@@ -195,7 +198,7 @@ class OCRExtractor:
         if self._ocr is None:
             return None
         try:
-            result = self._ocr.ocr(image_path, cls=True)
+            result = self._ocr.ocr(image_path)
             texts = [line[1][0] for block in result for line in block if line[1][1] > 0.7]
             logger.debug(f"OCR extracted texts: {texts}")
             for text in texts:

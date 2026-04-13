@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -30,12 +31,25 @@ from cva.common.logger import get_logger
 from cva.session.orchestrator import SessionOrchestrator
 
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
+_ocr_reader = None  # EasyOCR singleton — initialized on first upload
 
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
     global _event_loop
     _event_loop = asyncio.get_running_loop()
+    # Pre-load all heavy models at startup so first session is instant
+    import time as _t
+    _t0 = _t.time()
+    logger.info("Pre-loading CV models...")
+    from cva.session.orchestrator import (
+        _get_identity, _get_body_language, _get_grooming, _get_scorer,
+    )
+    _get_identity()
+    _get_body_language()
+    _get_grooming()
+    _get_scorer("developer")
+    logger.info(f"All models ready in {_t.time()-_t0:.1f}s")
     yield
 
 logger = get_logger(__name__)
@@ -124,29 +138,37 @@ def api_health():
 @app.post("/session/start", response_model=SessionResponse)
 def start_session(req: StartSessionRequest):
     global _session, _latest_score, _latest_health
-    if _session is not None:
-        _session.stop()
+    try:
+        if _session is not None:
+            _session.stop()
+            _session = None
 
-    _latest_score = None
-    _latest_health = None
+        _latest_score = None
+        _latest_health = None
 
-    _session = SessionOrchestrator(
-        candidate_id=req.candidate_id,
-        role=req.role,
-        scheduled_start=req.scheduled_start,
-        on_score=_on_score,
-        on_health=_on_health,
-    )
+        _session = SessionOrchestrator(
+            candidate_id=req.candidate_id,
+            role=req.role,
+            scheduled_start=req.scheduled_start,
+            on_score=_on_score,
+            on_health=_on_health,
+        )
 
-    if req.aadhaar_name and req.cv_name:
-        _session.set_candidate_names(req.aadhaar_name, req.cv_name)
+        if req.aadhaar_name or req.cv_name:
+            _session.set_candidate_names(
+                aadhaar_name=req.aadhaar_name or "",
+                cv_name=req.cv_name or req.aadhaar_name or "",
+            )
 
-    _session.start()
-    return SessionResponse(
-        session_id=_session.session_id,
-        status="started",
-        hardware_backend=get_primary_backend(),
-    )
+        _session.start()
+        return SessionResponse(
+            session_id=_session.session_id,
+            status="started",
+            hardware_backend=get_primary_backend(),
+        )
+    except Exception as e:
+        logger.error(f"Session start failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/session/stop")
@@ -176,10 +198,7 @@ def get_session_health():
 
 @app.post("/session/reference")
 async def upload_reference(data: dict):
-    """
-    Accept a base64-encoded reference image (Aadhaar photo) for identity.
-    Body: { "image_b64": "<base64 string>" }
-    """
+    """Legacy endpoint — kept for compatibility."""
     global _session
     if _session is None:
         raise HTTPException(status_code=404, detail="No active session.")
@@ -193,23 +212,200 @@ async def upload_reference(data: dict):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.post("/session/aadhaar")
+async def upload_aadhaar(data: dict):
+    """
+    Full Aadhaar card processing:
+      1. Decode the uploaded card image (base64)
+      2. Run PaddleOCR to extract the candidate name
+      3. Run InsightFace to extract face embedding as identity reference
+      4. Optionally accept manually entered name override
+    Body: { "image_b64": "<base64>", "manual_name": "<optional override>" }
+    Returns: { "status", "name_detected", "face_detected", "name_used" }
+    """
+    global _session
+    if _session is None:
+        raise HTTPException(status_code=404, detail="No active session.")
+
+    try:
+        img_bytes = base64.b64decode(data["image_b64"])
+        nparr    = np.frombuffer(img_bytes, np.uint8)
+        card_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if card_img is None:
+            raise HTTPException(status_code=400, detail="Could not decode image.")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Image decode error: {e}")
+
+    result = {
+        "status": "ok",
+        "face_detected": False,
+        "name_detected": None,
+        "name_used": None,
+        "ocr_texts": [],
+    }
+
+    # ── 1. OCR — extract name from ID card ──────────────────────────────
+    manual_name = data.get("manual_name", "").strip()
+    ocr_name: Optional[str] = None
+    try:
+        import easyocr
+        global _ocr_reader
+        if "_ocr_reader" not in globals() or _ocr_reader is None:
+            _ocr_reader = easyocr.Reader(["en", "hi"], gpu=True, verbose=False)
+
+        # ── Image preprocessing for robust OCR ──
+        proc = card_img.copy()
+        h, w = proc.shape[:2]
+        # Upscale small images (phone photos of cards can be tiny)
+        if max(h, w) < 1000:
+            scale = 1500 / max(h, w)
+            proc = cv2.resize(proc, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        # Convert to grayscale, enhance contrast, denoise
+        gray = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
+        gray = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(gray)
+        gray = cv2.fastNlMeansDenoising(gray, h=12)
+        # Sharpen
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+        gray = cv2.filter2D(gray, -1, kernel)
+
+        # Run EasyOCR with English + Hindi for Indian ID cards
+        ocr_results = _ocr_reader.readtext(gray, paragraph=False)
+        # Keep text + confidence, sorted by vertical position (top to bottom)
+        raw_lines = [(bbox, text.strip(), conf) for (bbox, text, conf) in ocr_results if text.strip()]
+        raw_lines.sort(key=lambda x: x[0][0][1])  # sort by y-coordinate
+        texts = [text for (_, text, conf) in raw_lines if conf > 0.25]
+        result["ocr_texts"] = texts
+        logger.info(f"OCR texts ({len(texts)} lines): {texts}")
+
+        # ── Strategy 1: Label-based detection ──
+        # Indian IDs have "Name" / "नाम" / "नाम / Name" labels; the actual
+        # name is usually the NEXT line after such a label.
+        name_labels = ["name", "नाम", "naam"]
+        skip_labels = ["father", "पिता", "mother", "माता", "husband", "पति",
+                        "signature", "हस्ताक्षर"]
+        for i, t in enumerate(texts):
+            t_lower = t.lower().strip()
+            # Check if this line IS a name label (or contains one)
+            is_name_label = any(lbl in t_lower for lbl in name_labels)
+            is_skip_label = any(lbl in t_lower for lbl in skip_labels)
+            if is_name_label and not is_skip_label:
+                # The name might be on the SAME line after "Name" or on the NEXT line
+                # Case 1: "Name SHREYAS SHRIPAD WAKHARE" or "नाम / Name"
+                # Extract text after the label
+                after = re.split(r'(?i)name\s*[:/]?\s*', t)
+                if len(after) > 1 and len(after[-1].strip()) > 3:
+                    candidate = after[-1].strip()
+                    # Verify it looks like a name (mostly letters)
+                    alpha_ratio = sum(1 for c in candidate if c.isalpha() or c == ' ') / max(len(candidate), 1)
+                    if alpha_ratio > 0.8:
+                        ocr_name = candidate
+                        logger.info(f"OCR name (same-line after label): '{ocr_name}'")
+                        break
+                # Case 2: Name is on the next line
+                if i + 1 < len(texts):
+                    candidate = texts[i + 1].strip()
+                    alpha_ratio = sum(1 for c in candidate if c.isalpha() or c == ' ') / max(len(candidate), 1)
+                    if alpha_ratio > 0.7 and len(candidate) > 3:
+                        ocr_name = candidate
+                        logger.info(f"OCR name (next line after '{t}'): '{ocr_name}'")
+                        break
+
+        # ── Strategy 2: Fallback heuristic if label-based failed ──
+        if not ocr_name:
+            skip_words = {
+                "government", "india", "aadhaar", "unique", "identification",
+                "authority", "male", "female", "transgender", "of", "the",
+                "income", "tax", "department", "permanent", "account", "number", "card",
+                "address", "digilocker", "powered", "tap", "zoom", "download",
+                "date", "birth", "dob", "year", "vid", "help", "to", "govt",
+                "signature", "father", "mother", "husband", "name",
+                "maharashtra", "karnataka", "delhi", "tamil", "nadu",
+                "andhra", "pradesh", "telangana", "gujarat", "rajasthan",
+                "campus", "phase", "road", "city", "next", "pune",
+                "nagar", "wadi", "dighi", "camp", "tirupati", "pin",
+                "issue", "enrolment", "enrollment", "no", "qr", "code",
+            }
+            for t in texts:
+                clean = t.strip()
+                if len(clean) < 4:
+                    continue
+                # Skip lines with >30% digits
+                digit_ratio = sum(1 for c in clean if c.isdigit()) / max(len(clean), 1)
+                if digit_ratio > 0.3:
+                    continue
+                # Skip date patterns
+                if "/" in clean or (any(c == '-' for c in clean) and any(c.isdigit() for c in clean)):
+                    continue
+                # Skip Hindi-only lines (Devanagari characters)
+                devanagari_ratio = sum(1 for c in clean if '\u0900' <= c <= '\u097F') / max(len(clean), 1)
+                if devanagari_ratio > 0.5:
+                    continue
+                # Skip lines that are mostly keywords
+                words = clean.split()
+                lower_words = [w.lower().rstrip(".:,/") for w in words]
+                keyword_count = sum(1 for w in lower_words if w in skip_words)
+                if keyword_count >= len(words) * 0.5:
+                    continue
+                # Must be mostly alphabetic
+                alpha_ratio = sum(1 for c in clean if c.isalpha() or c == ' ') / max(len(clean), 1)
+                if alpha_ratio < 0.8:
+                    continue
+                # Must have 2+ words that look like names (capitalized or all-caps)
+                if len(words) >= 2:
+                    ocr_name = clean
+                    logger.info(f"OCR name (fallback heuristic): '{ocr_name}'")
+                    break
+
+        if not ocr_name:
+            logger.warning(f"OCR could not extract name from {len(texts)} text lines.")
+        result["name_detected"] = ocr_name
+    except ImportError:
+        logger.warning("easyocr not installed — skipping OCR name extraction.")
+    except Exception as e:
+        logger.warning(f"OCR failed: {e}", exc_info=True)
+
+    # Use manual name if provided, else OCR name
+    name_to_use = manual_name or ocr_name
+    result["name_used"] = name_to_use
+
+    # ── 2. Face extraction — set as identity reference ────────────────────
+    # Detect face on the full card; if face is too small, upscale progressively
+    h, w = card_img.shape[:2]
+    face_ok = False
+
+    # Try original size first, then 2x and 3x upscale
+    for scale_label, scale in [("original", 1), ("2x", 2), ("3x", 3)]:
+        if scale == 1:
+            img = card_img
+        else:
+            img = cv2.resize(card_img, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+        try:
+            face_ok = _session.set_reference_image(img)
+            if face_ok:
+                logger.info(f"Face found in Aadhaar card ({scale_label}, {img.shape[1]}x{img.shape[0]})")
+                break
+        except Exception as e:
+            logger.debug(f"Face detection failed at {scale_label}: {e}")
+
+    result["face_detected"] = face_ok
+    if not face_ok:
+        result["status"] = "face_not_found"
+        logger.warning("No face detected in Aadhaar card image.")
+
+    # ── 3. Set candidate name for name-match red flag ─────────────────────
+    if name_to_use:
+        _session.set_candidate_names(
+            aadhaar_name=name_to_use,
+            cv_name=name_to_use,   # same until CV name is provided separately
+        )
+        logger.info(f"Aadhaar name set: '{name_to_use}'")
+
+    return result
+
+
 # ── MJPEG Video Feed ──────────────────────────────────────────────────────────
 
-_video_cap: Optional[cv2.VideoCapture] = None
-_video_lock = asyncio.Lock()
-
-
-def _get_capture() -> Optional[cv2.VideoCapture]:
-    global _video_cap
-    if _video_cap is None or not _video_cap.isOpened():
-        from cva.config.settings import VIDEO_SOURCE, FRAME_WIDTH, FRAME_HEIGHT
-        _video_cap = cv2.VideoCapture(VIDEO_SOURCE)
-        if _video_cap.isOpened():
-            _video_cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-            _video_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-            for _ in range(10):
-                _video_cap.read()
-    return _video_cap if (_video_cap and _video_cap.isOpened()) else None
+from cva.ingestion.camera import get_capture as _get_capture
 
 
 def _annotate_frame(frame: np.ndarray) -> np.ndarray:
@@ -261,9 +457,10 @@ async def _mjpeg_generator():
         cap = _get_capture()
         if cap is None:
             # Send a black placeholder frame
-            blank = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(blank, "Camera not available", (160, 240),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (100, 116, 139), 2)
+            from cva.config.settings import FRAME_WIDTH, FRAME_HEIGHT
+            blank = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
+            cv2.putText(blank, "Camera not available", (int(FRAME_WIDTH * 0.2), FRAME_HEIGHT // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 116, 139), 2)
             _, buf = cv2.imencode(".jpg", blank, [cv2.IMWRITE_JPEG_QUALITY, 70])
             yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
                    + buf.tobytes() + b"\r\n")

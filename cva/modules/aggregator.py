@@ -47,8 +47,8 @@ class MultiFrameAggregator:
             "posture_score": 0.8,
             "fidget_score": 0.0,
             "smile_ratio": 0.0,
-            "speech_energy_score": 0.0,  # Start at 0 — must earn score
-            "grooming_score": 0.5,       # Start neutral
+            "speech_energy_score": 0.6,  # Start generous — silence shouldn't tank score
+            "grooming_score": 0.6,       # Start generous
             "punctuality_score": 1.0,
         }
 
@@ -84,12 +84,26 @@ class MultiFrameAggregator:
                 severity=severity, confidence=confidence,
             ))
 
+    @staticmethod
+    def _remap_identity(raw_sim: float) -> float:
+        """Remap cosine similarity to a fairer identity score.
+        Aadhaar-vs-webcam typically gives 0.30-0.55 due to print quality,
+        lighting, and angle differences. This curve maps:
+          0.25 → 0.40,  0.35 → 0.70,  0.45 → 0.85,  0.55+ → 0.95+
+        """
+        if raw_sim >= 0.55:
+            return min(1.0, 0.90 + (raw_sim - 0.55) * 0.5)
+        if raw_sim >= 0.30:
+            return 0.40 + (raw_sim - 0.25) * 2.0  # steep ramp in the typical range
+        return max(0.1, raw_sim * 1.5)
+
     def _update_ema(self, f: FrameFeatures) -> None:
         if f.face_cosine_similarity is not None:
-            identity_score = f.face_cosine_similarity if f.identity_verified else f.face_cosine_similarity * 0.5
+            identity_score = self._remap_identity(f.face_cosine_similarity)
             self._ema_update("identity_score", identity_score)
         elif f.face_detected is False:
-            self._ema_update("identity_score", 0.0)
+            # Don't slam to 0 on missed frames — decay gently
+            self._ema_update("identity_score", max(0.5, self._ema["identity_score"] * 0.98))
 
         gaze_val = 1.0 if f.gaze_on_camera else max(0.0, 1.0 - f.gaze_off_seconds / GAZE_OFF_CAMERA_THRESHOLD_SEC)
         self._ema_update("gaze_score", gaze_val)
@@ -102,8 +116,11 @@ class MultiFrameAggregator:
         smile_val = 1.0 if f.smile_detected else 0.0
         self._ema_update("smile_ratio", smile_val)
 
-        # Speech: only score if mic is actually producing signal
-        speech_val = min(1.0, f.speech_rms / max(0.001, SPEECH_RMS_THRESHOLD * 2))
+        # Speech: if mic is dead (RMS near zero), don't penalise — use neutral
+        if f.speech_rms < 0.001:
+            speech_val = 0.6   # neutral — mic likely not working
+        else:
+            speech_val = min(1.0, f.speech_rms / max(0.001, SPEECH_RMS_THRESHOLD * 2))
         self._ema_update("speech_energy_score", speech_val)
 
         if f.grooming_score is not None:
@@ -171,7 +188,7 @@ class MultiFrameAggregator:
         # ── Low speech energy ─────────────────────────────────────────
         if f.speech_rms < SPEECH_RMS_THRESHOLD:
             self._low_speech_frames += 1
-            if self._low_speech_frames == 15:
+            if self._low_speech_frames == 60:
                 self._add_flag(
                     "first_impression",
                     f"Very low speech energy (rms={f.speech_rms:.4f}) — speak louder",
@@ -183,10 +200,10 @@ class MultiFrameAggregator:
         # ── Identity mismatch ─────────────────────────────────────────
         if f.face_cosine_similarity is not None and f.face_cosine_similarity < IDENTITY_COSINE_THRESHOLD:
             self._low_identity_frames += 1
-            if self._low_identity_frames == 3:
+            if self._low_identity_frames == 5:
                 self._add_flag(
                     "identity",
-                    f"Face mismatch — cosine similarity {f.face_cosine_similarity:.2f} < {IDENTITY_COSINE_THRESHOLD}",
+                    f"Face mismatch (similarity={f.face_cosine_similarity:.2f}, threshold={IDENTITY_COSINE_THRESHOLD}) — candidate may not match Aadhaar photo",
                     RedFlagSeverity.HIGH, 0.92,
                 )
         else:

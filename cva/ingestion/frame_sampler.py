@@ -72,15 +72,12 @@ class FrameSampler:
         self._frame_id = 0
 
     def start(self) -> None:
-        self._cap = cv2.VideoCapture(VIDEO_SOURCE)
-        if not self._cap.isOpened():
+        from cva.ingestion.camera import get_camera
+        self._camera = get_camera()
+        if not self._camera.is_opened:
             raise RuntimeError(f"Cannot open video source: {VIDEO_SOURCE}")
-        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-        # Warm up: discard first 30 frames so camera auto-exposure settles
-        for _ in range(30):
-            self._cap.read()
         self._running = True
+        self._last_frame_id = 0
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
         logger.info("FrameSampler started.")
@@ -89,8 +86,7 @@ class FrameSampler:
         self._running = False
         if self._thread:
             self._thread.join(timeout=3)
-        if self._cap:
-            self._cap.release()
+        self._camera = None
         logger.info("FrameSampler stopped.")
 
     def _capture_loop(self) -> None:
@@ -106,13 +102,16 @@ class FrameSampler:
                 time.sleep(0.005)
                 continue
 
-            ret, frame = self._cap.read()
-            if not ret:
-                logger.warning("Failed to read frame — source may have ended.")
-                time.sleep(0.1)
+            # Read latest frame from shared camera (non-blocking)
+            cur_id = self._camera.frame_id
+            if cur_id == self._last_frame_id:
+                time.sleep(0.005)
+                continue  # no new frame yet
+            ret, frame = self._camera.read()
+            if not ret or frame is None:
+                time.sleep(0.01)
                 continue
-
-            frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
+            self._last_frame_id = cur_id
 
             is_good, reason = check_frame_quality(frame)
             if not is_good:

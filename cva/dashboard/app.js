@@ -22,37 +22,118 @@ let ws = null;
 
 // ── DOM ────────────────────────────────────────────────────────────────────
 document.getElementById("app").innerHTML = `
-<div class="max-w-7xl mx-auto px-4 py-6 space-y-6">
+
+<!-- ==================== LANDING PAGE ==================== -->
+<div id="landing-page" class="min-h-screen flex items-center justify-center px-4 py-10">
+  <div class="max-w-2xl w-full space-y-8">
+
+    <!-- Logo + Title -->
+    <div class="text-center space-y-2">
+      <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-sky-500/20 mb-2">
+        <svg class="w-8 h-8 text-sky-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+        </svg>
+      </div>
+      <h1 class="text-3xl font-bold text-sky-400">Candidate Visual Assessment</h1>
+      <p class="text-slate-400 text-sm">AI-powered interview assessment system</p>
+    </div>
+
+    <!-- Step 1: Upload Document -->
+    <div id="landing-step1" class="card p-6 space-y-5">
+      <div class="flex items-center gap-3">
+        <span class="flex items-center justify-center w-8 h-8 rounded-full bg-sky-500 text-white text-sm font-bold">1</span>
+        <h2 class="text-lg font-semibold text-slate-200">Upload Identity Document</h2>
+      </div>
+      <p class="text-slate-400 text-sm">Upload your Aadhaar card or government ID. Our OCR will automatically extract your name and photo for identity verification.</p>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+        <div>
+          <div id="aadhaar-drop" class="border-2 border-dashed border-slate-600 rounded-xl p-6 text-center cursor-pointer hover:border-sky-500 transition-colors min-h-[160px] flex flex-col items-center justify-center">
+            <input type="file" id="aadhaar-file" accept="image/*" class="hidden"/>
+            <img id="aadhaar-preview" class="hidden mx-auto max-h-40 rounded-lg mb-2 object-contain"/>
+            <svg id="upload-icon" class="w-10 h-10 text-slate-600 mb-2" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+            </svg>
+            <p id="aadhaar-drop-hint" class="text-slate-500 text-sm">Click or drag your ID card image here</p>
+          </div>
+        </div>
+        <div class="space-y-3">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Candidate Name (auto-filled by OCR)</label>
+            <input id="aadhaar-name" type="text" placeholder="Will be detected automatically"
+              class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-sky-500"/>
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">CV / Resume Name</label>
+            <input id="cv-name" type="text" placeholder="As mentioned in your CV"
+              class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-sky-500"/>
+          </div>
+          <div id="aadhaar-status" class="hidden rounded-lg px-3 py-2 text-xs font-mono"></div>
+          <button id="btn-upload-aadhaar" disabled
+            class="w-full bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold px-4 py-2.5 rounded-lg text-sm transition-colors">
+            Scan & Verify Document
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 2: Welcome + Start (hidden until OCR completes) -->
+    <div id="landing-step2" class="hidden card p-6 space-y-5">
+      <div class="flex items-center gap-3">
+        <span class="flex items-center justify-center w-8 h-8 rounded-full bg-emerald-500 text-white text-sm font-bold">✓</span>
+        <h2 class="text-lg font-semibold text-emerald-300" id="welcome-heading">Identity Verified</h2>
+      </div>
+      <div class="bg-emerald-900/20 border border-emerald-700/40 rounded-xl p-5 text-center">
+        <p class="text-2xl font-bold text-emerald-400" id="welcome-name-display">Welcome!</p>
+        <p class="text-slate-400 text-sm mt-1" id="welcome-detail">Your identity has been verified successfully.</p>
+      </div>
+      <div class="flex items-center gap-4">
+        <select id="role-select" class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100 flex-shrink-0">
+          <option value="developer">Developer</option>
+          <option value="sales">Sales</option>
+          <option value="hr">HR</option>
+        </select>
+        <button id="btn-start"
+          class="flex-1 bg-sky-500 hover:bg-sky-600 text-white font-bold px-6 py-3 rounded-lg text-base transition-colors">
+          Start Assessment
+        </button>
+      </div>
+    </div>
+
+    <!-- Skip option -->
+    <div id="landing-skip" class="text-center">
+      <button id="btn-skip-aadhaar" class="text-slate-500 hover:text-slate-300 text-sm underline transition-colors">
+        Skip identity verification and start directly
+      </button>
+    </div>
+
+  </div>
+</div>
+
+<!-- ==================== DASHBOARD (hidden until session starts) ==================== -->
+<div id="dashboard-page" class="hidden max-w-7xl mx-auto px-4 py-6 space-y-6">
 
   <!-- Header -->
   <div class="flex items-center justify-between">
     <div>
       <h1 class="text-2xl font-bold text-sky-400">CVA Assessment Dashboard</h1>
-      <p class="text-slate-400 text-sm mt-0.5">Candidate Visual Assessment — Demo Mode</p>
+      <p class="text-slate-400 text-sm mt-0.5" id="dash-subtitle">Candidate Visual Assessment</p>
     </div>
     <div class="flex items-center gap-3">
-      <select id="role-select" class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-100">
-        <option value="developer">Developer</option>
-        <option value="sales">Sales</option>
-        <option value="hr">HR</option>
-      </select>
-      <button id="btn-start" class="bg-sky-500 hover:bg-sky-600 text-white font-semibold px-4 py-2 rounded-lg text-sm transition-colors">
-        Start Session
-      </button>
-      <button id="btn-stop" class="hidden bg-red-500 hover:bg-red-600 text-white font-semibold px-4 py-2 rounded-lg text-sm transition-colors">
+      <button id="btn-stop" class="bg-red-500 hover:bg-red-600 text-white font-semibold px-4 py-2 rounded-lg text-sm transition-colors">
         Stop Session
       </button>
     </div>
   </div>
 
   <!-- Session + Backend Banner -->
-  <div id="session-banner" class="hidden card px-4 py-3 flex items-center gap-4 text-sm">
+  <div id="session-banner" class="card px-4 py-3 flex items-center gap-4 text-sm">
     <span class="text-slate-400">Session:</span>
     <span id="session-id-label" class="font-mono text-sky-300"></span>
     <span class="text-slate-400 ml-4">Backend:</span>
     <span id="backend-label" class="font-mono text-emerald-300"></span>
     <span id="warmup-badge" class="hidden ml-auto bg-amber-900/40 text-amber-300 border border-amber-700/50 rounded-full px-3 py-0.5 text-xs">
-      ⏳ Warming up…
+      Warming up...
     </span>
   </div>
 
@@ -177,7 +258,7 @@ document.getElementById("app").innerHTML = `
     <span id="ws-dot" class="w-2 h-2 rounded-full bg-slate-600"></span>
     <span id="ws-status">Disconnected</span>
   </div>
-</div>
+</div><!-- end dashboard-page -->
 `;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -248,7 +329,7 @@ function renderShap(shap) {
 
 function renderRedFlags(flags) {
   if (!flags.length) return;
-  state.redFlags = [...state.redFlags, ...flags].slice(-20);
+  state.redFlags = flags.slice(-20);
   document.getElementById("flag-count").textContent = state.redFlags.length;
   const container = document.getElementById("flag-list");
   container.innerHTML = [...state.redFlags].reverse().map(f => {
@@ -292,6 +373,7 @@ function renderHealth(health) {
 // ── WebSocket ──────────────────────────────────────────────────────────────
 
 function connectWS() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   ws = new WebSocket(WS_URL);
   ws.onopen  = () => setWsStatus(true);
   ws.onclose = () => { setWsStatus(false); setTimeout(connectWS, 3000); };
@@ -301,6 +383,20 @@ function connectWS() {
     if (msg.type === "score")  renderScore(msg.data);
     if (msg.type === "health") renderHealth(msg.data);
   };
+}
+
+// ── Page navigation ───────────────────────────────────────────────────────
+
+let _verifiedName = null;  // set after OCR succeeds
+
+function showLanding() {
+  document.getElementById("landing-page").classList.remove("hidden");
+  document.getElementById("dashboard-page").classList.add("hidden");
+}
+
+function showDashboard() {
+  document.getElementById("landing-page").classList.add("hidden");
+  document.getElementById("dashboard-page").classList.remove("hidden");
 }
 
 // ── Session controls ───────────────────────────────────────────────────────
@@ -313,21 +409,34 @@ document.getElementById("btn-start").addEventListener("click", async () => {
   document.getElementById("flag-count").textContent = "0";
 
   try {
+    const aadhaarName = document.getElementById("aadhaar-name").value.trim();
+    const cvName      = document.getElementById("cv-name").value.trim();
     const res = await fetch(`${API_BASE}/session/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ candidate_id: "demo_candidate", role }),
+      body: JSON.stringify({
+        candidate_id: "demo_candidate",
+        role,
+        aadhaar_name: aadhaarName || null,
+        cv_name:      cvName      || null,
+      }),
     });
     const data = await res.json();
     state.sessionId = data.session_id;
     state.status = "running";
 
-    document.getElementById("session-banner").classList.remove("hidden");
+    // If Aadhaar was scanned on landing, upload the reference now
+    if (_aadhaarImageB64) {
+      await doAadhaarUpload();
+    }
+
+    // Switch to dashboard
+    const subtitle = _verifiedName ? `Welcome, ${_verifiedName}` : "Candidate Visual Assessment";
+    document.getElementById("dash-subtitle").textContent = subtitle;
     document.getElementById("session-id-label").textContent = data.session_id;
     document.getElementById("backend-label").textContent    = data.hardware_backend;
-    document.getElementById("btn-start").classList.add("hidden");
-    document.getElementById("btn-stop").classList.remove("hidden");
     document.getElementById("role-badge").textContent = role;
+    showDashboard();
   } catch (err) {
     alert(`Failed to start session: ${err.message}`);
   }
@@ -338,10 +447,179 @@ document.getElementById("btn-stop").addEventListener("click", async () => {
     await fetch(`${API_BASE}/session/stop`, { method: "POST" });
   } catch (_) {}
   state.status = "stopped";
-  document.getElementById("btn-stop").classList.add("hidden");
-  document.getElementById("btn-start").classList.remove("hidden");
-  document.getElementById("session-banner").classList.add("hidden");
+  state.sessionId = null;
+  _verifiedName = null;
+  _aadhaarImageB64 = null;
+
+  // Reset landing page
+  document.getElementById("landing-step2").classList.add("hidden");
+  document.getElementById("landing-step1").classList.remove("hidden");
+  document.getElementById("landing-skip").classList.remove("hidden");
+  document.getElementById("aadhaar-preview").classList.add("hidden");
+  document.getElementById("aadhaar-preview").src = "";
+  const uploadIcon = document.getElementById("upload-icon");
+  if (uploadIcon) uploadIcon.classList.remove("hidden");
+  document.getElementById("aadhaar-drop-hint").textContent = "Click or drag your ID card image here";
+  document.getElementById("aadhaar-name").value = "";
+  document.getElementById("cv-name").value = "";
+  document.getElementById("btn-upload-aadhaar").disabled = true;
+  const statusEl = document.getElementById("aadhaar-status");
+  statusEl.classList.add("hidden");
+
+  showLanding();
+});
+
+// ── Aadhaar Upload ─────────────────────────────────────────────────────────
+
+let _aadhaarImageB64 = null;
+
+function aadhaarStatus(msg, type = "info") {
+  const el = document.getElementById("aadhaar-status");
+  el.classList.remove("hidden", "bg-red-900/40", "bg-sky-900/40", "bg-emerald-900/40",
+                       "text-red-300", "text-sky-300", "text-emerald-300");
+  const map = { error: ["bg-red-900/40","text-red-300"], info: ["bg-sky-900/40","text-sky-300"],
+                success: ["bg-emerald-900/40","text-emerald-300"] };
+  el.classList.add(...(map[type] || map.info));
+  el.textContent = msg;
+}
+
+// File picker / drag-drop
+document.getElementById("aadhaar-drop").addEventListener("click", () =>
+  document.getElementById("aadhaar-file").click()
+);
+document.getElementById("aadhaar-drop").addEventListener("dragover", e => {
+  e.preventDefault();
+  e.currentTarget.classList.add("border-sky-400");
+});
+document.getElementById("aadhaar-drop").addEventListener("dragleave", e =>
+  e.currentTarget.classList.remove("border-sky-400")
+);
+document.getElementById("aadhaar-drop").addEventListener("drop", e => {
+  e.preventDefault();
+  e.currentTarget.classList.remove("border-sky-400");
+  const file = e.dataTransfer.files[0];
+  if (file) handleAadhaarFile(file);
+});
+document.getElementById("aadhaar-file").addEventListener("change", e => {
+  const file = e.target.files[0];
+  if (file) handleAadhaarFile(file);
+});
+
+function handleAadhaarFile(file) {
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    const dataUrl = ev.target.result;
+    _aadhaarImageB64 = dataUrl.split(",")[1];
+
+    const preview = document.getElementById("aadhaar-preview");
+    preview.src = dataUrl;
+    preview.classList.remove("hidden");
+    const uploadIcon = document.getElementById("upload-icon");
+    if (uploadIcon) uploadIcon.classList.add("hidden");
+    document.getElementById("aadhaar-drop-hint").textContent = file.name;
+
+    document.getElementById("btn-upload-aadhaar").disabled = false;
+    aadhaarStatus("Image loaded. Click 'Scan & Verify Document' to process.", "info");
+  };
+  reader.readAsDataURL(file);
+}
+
+// OCR scan on landing page (no session required — just extracts name + validates)
+document.getElementById("btn-upload-aadhaar").addEventListener("click", async () => {
+  if (!_aadhaarImageB64) return;
+
+  const manualName = document.getElementById("aadhaar-name").value.trim();
+  aadhaarStatus("Scanning document (OCR + face detection)...", "info");
+  document.getElementById("btn-upload-aadhaar").disabled = true;
+
+  try {
+    // Start a temporary session to do the OCR + face extraction
+    const startRes = await fetch(`${API_BASE}/session/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ candidate_id: "demo_candidate", role: "developer" }),
+    });
+    const startData = await startRes.json();
+    state.sessionId = startData.session_id;
+
+    // Now upload the Aadhaar card
+    const res = await fetch(`${API_BASE}/session/aadhaar`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image_b64: _aadhaarImageB64, manual_name: manualName }),
+    });
+    const data = await res.json();
+
+    // Stop the temp session — real one starts when user clicks Start Assessment
+    await fetch(`${API_BASE}/session/stop`, { method: "POST" });
+    state.sessionId = null;
+
+    if (!res.ok) {
+      aadhaarStatus(`Error: ${data.detail || "Unknown error"}`, "error");
+      document.getElementById("btn-upload-aadhaar").disabled = false;
+      return;
+    }
+
+    // Auto-fill name
+    if (data.name_detected && !manualName) {
+      document.getElementById("aadhaar-name").value = data.name_detected;
+    }
+
+    const nameUsed = data.name_used || "Candidate";
+    const faceOk   = data.face_detected;
+
+    if (faceOk || data.name_detected) {
+      _verifiedName = nameUsed;
+
+      // Show welcome step
+      document.getElementById("welcome-name-display").textContent = `Welcome, ${nameUsed}!`;
+      document.getElementById("welcome-detail").textContent =
+        faceOk ? "Your identity document has been verified. Face and name extracted successfully."
+               : `Name detected: ${nameUsed}. Face not found — manual verification may be needed.`;
+      document.getElementById("welcome-heading").textContent =
+        faceOk ? "Identity Verified" : "Document Scanned";
+
+      document.getElementById("landing-step1").classList.add("hidden");
+      document.getElementById("landing-step2").classList.remove("hidden");
+      document.getElementById("landing-skip").classList.add("hidden");
+
+      // Also update CV name field
+      const cvInput = document.getElementById("cv-name");
+      if (!cvInput.value && data.name_used) cvInput.value = data.name_used;
+    } else {
+      aadhaarStatus("Could not extract name or face. Try a clearer image or enter name manually.", "error");
+      document.getElementById("btn-upload-aadhaar").disabled = false;
+    }
+  } catch (err) {
+    aadhaarStatus(`Scan failed: ${err.message}`, "error");
+    document.getElementById("btn-upload-aadhaar").disabled = false;
+  }
+});
+
+// Aadhaar upload after session start (sends reference image to running session)
+async function doAadhaarUpload() {
+  if (!_aadhaarImageB64 || !state.sessionId) return;
+  try {
+    await fetch(`${API_BASE}/session/aadhaar`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        image_b64: _aadhaarImageB64,
+        manual_name: document.getElementById("aadhaar-name").value.trim(),
+      }),
+    });
+  } catch (_) {}
+}
+
+// Skip button — show start directly without identity
+document.getElementById("btn-skip-aadhaar").addEventListener("click", () => {
+  document.getElementById("welcome-name-display").textContent = "Welcome!";
+  document.getElementById("welcome-detail").textContent = "No identity document provided. Proceeding without verification.";
+  document.getElementById("welcome-heading").textContent = "Ready to Start";
+  document.getElementById("landing-step2").classList.remove("hidden");
+  document.getElementById("landing-skip").classList.add("hidden");
 });
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 connectWS();
+showLanding();

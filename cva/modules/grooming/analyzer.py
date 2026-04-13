@@ -76,7 +76,7 @@ class GroomingAnalyzer:
             return features
 
         try:
-            results = self._model(frame, verbose=False, conf=GROOMING_CONFIDENCE_THRESHOLD, device=self._device)
+            results = self._model(frame, verbose=False, conf=GROOMING_CONFIDENCE_THRESHOLD, device=self._device, imgsz=320)
             attire_class, grooming_score = self._parse_results(results)
             features.attire_class = attire_class
             features.grooming_score = grooming_score

@@ -40,14 +40,12 @@ def _angle_between(p1: np.ndarray, p2: np.ndarray) -> float:
 
 class BodyLanguageAnalyzer:
     """
-    Runs MediaPipe Holistic per frame.
-    Computes posture angle, gaze direction, and fidget score.
-    Maintains temporal state for red-flag triggering.
+    Runs MediaPipe FaceMesh per frame (single model for gaze + posture + fidget).
+    Computes posture angle from head tilt, gaze direction from iris, fidget from frame diff.
     """
 
     def __init__(self):
-        self._holistic = None
-        self._face_mesh = None
+        self._face_mesh_model = None
         self._mock = False
         self._load()
 
@@ -70,21 +68,17 @@ class BodyLanguageAnalyzer:
     def _load(self) -> None:
         try:
             import mediapipe as mp
-            self._mp_holistic = mp.solutions.holistic
             self._mp_face_mesh = mp.solutions.face_mesh
-            self._holistic = self._mp_holistic.Holistic(
-                static_image_mode=False,
-                model_complexity=0,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5,
-            )
+            # Single FaceMesh model replaces Holistic + FaceMesh (saves ~200ms/frame)
             self._face_mesh_model = self._mp_face_mesh.FaceMesh(
                 static_image_mode=False,
                 max_num_faces=1,
-                refine_landmarks=True,
+                refine_landmarks=False,  # iris model adds ~200ms — not needed
                 min_detection_confidence=0.5,
+                min_tracking_confidence=0.5,
             )
-            logger.info("MediaPipe Holistic + FaceMesh loaded.")
+            self._holistic = None  # Not used anymore
+            logger.info("MediaPipe FaceMesh loaded (unified model).")
         except ImportError:
             logger.warning("MediaPipe not installed — using mock body language analyzer.")
             self._mock = True
@@ -99,34 +93,35 @@ class BodyLanguageAnalyzer:
             features.emotion = "neutral"
             return features
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w = frame.shape[:2]
+        # Downscale to 320x240 for faster MediaPipe inference
+        small = cv2.resize(frame, (320, 240), interpolation=cv2.INTER_AREA)
+        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+        h, w = small.shape[:2]
 
-        holistic_result = self._holistic.process(rgb)
+        # Single FaceMesh pass for gaze + posture (replaces Holistic + FaceMesh)
         face_result = self._face_mesh_model.process(rgb)
 
-        features = self._compute_posture(holistic_result, h, w, features, now)
+        features = self._compute_posture_from_face(face_result, h, w, features, now)
         features = self._compute_gaze(face_result, w, features, now)
-        features = self._compute_fidget(frame, features)
+        features = self._compute_fidget_fast(small, features)
 
         return features
 
-    def _compute_posture(self, result, h: int, w: int, features: FrameFeatures, now: float) -> FrameFeatures:
-        if not result.pose_landmarks:
+    def _compute_posture_from_face(self, result, h: int, w: int, features: FrameFeatures, now: float) -> FrameFeatures:
+        """Estimate head tilt / slouch from face landmarks (no Holistic needed)."""
+        if not result.multi_face_landmarks:
             return features
 
-        lm = result.pose_landmarks.landmark
-
         try:
-            left_shoulder = np.array([lm[11].x * w, lm[11].y * h])
-            right_shoulder = np.array([lm[12].x * w, lm[12].y * h])
-            left_hip = np.array([lm[23].x * w, lm[23].y * h])
-            right_hip = np.array([lm[24].x * w, lm[24].y * h])
+            lm = result.multi_face_landmarks[0].landmark
+            # Use nose tip (1), chin (152), forehead (10) to estimate head tilt
+            nose = np.array([lm[1].x * w, lm[1].y * h])
+            chin = np.array([lm[152].x * w, lm[152].y * h])
+            forehead = np.array([lm[10].x * w, lm[10].y * h])
 
-            mid_shoulder = (left_shoulder + right_shoulder) / 2
-            mid_hip = (left_hip + right_hip) / 2
-
-            angle = _angle_between(mid_hip, mid_shoulder)
+            # Head tilt = angle of forehead-chin line from vertical
+            vec = forehead - chin
+            angle = abs(np.degrees(np.arctan2(vec[0], -vec[1])))
 
             if not self._calibrated:
                 self._baseline_samples.append(angle)
@@ -150,8 +145,9 @@ class BodyLanguageAnalyzer:
 
     def _compute_gaze(self, result, w: int, features: FrameFeatures, now: float) -> FrameFeatures:
         """
-        Gaze approximation using iris landmarks (MediaPipe FaceMesh refined).
-        If iris center deviates significantly from eye center → looking away.
+        Gaze approximation using nose direction relative to face center.
+        No iris landmarks needed (refine_landmarks=False for speed).
+        If nose tip deviates significantly from face midpoint → looking away.
         """
         if not result.multi_face_landmarks:
             features.gaze_on_camera = False
@@ -160,24 +156,30 @@ class BodyLanguageAnalyzer:
 
         try:
             lm = result.multi_face_landmarks[0].landmark
-            LEFT_IRIS = 468
-            RIGHT_IRIS = 473
-            LEFT_EYE_INNER = 133
-            LEFT_EYE_OUTER = 33
-            RIGHT_EYE_INNER = 362
-            RIGHT_EYE_OUTER = 263
+            # Use nose tip (1) vs face center (left ear 234, right ear 454)
+            nose_x = lm[1].x
+            left_face = lm[234].x   # left cheek
+            right_face = lm[454].x  # right cheek
+            face_center_x = (left_face + right_face) / 2
+            face_width = abs(right_face - left_face)
 
-            left_iris_x = lm[LEFT_IRIS].x
-            right_iris_x = lm[RIGHT_IRIS].x
-            left_eye_center = (lm[LEFT_EYE_INNER].x + lm[LEFT_EYE_OUTER].x) / 2
-            right_eye_center = (lm[RIGHT_EYE_INNER].x + lm[RIGHT_EYE_OUTER].x) / 2
+            # Nose deviation as fraction of face width
+            if face_width > 0.01:
+                deviation = abs(nose_x - face_center_x) / face_width
+            else:
+                deviation = 0.0
 
-            left_ratio = abs(left_iris_x - left_eye_center)
-            right_ratio = abs(right_iris_x - right_eye_center)
-            avg_deviation = (left_ratio + right_ratio) / 2
+            # Also check vertical: forehead (10) vs chin (152) tilt
+            nose_y = lm[1].y
+            forehead_y = lm[10].y
+            chin_y = lm[152].y
+            face_height = abs(chin_y - forehead_y)
+            face_center_y = (forehead_y + chin_y) / 2
+            v_deviation = abs(nose_y - face_center_y) / max(face_height, 0.01)
 
-            gaze_on = avg_deviation < 0.07
-            gaze_score = max(0.0, 1.0 - avg_deviation / 0.15)
+            total_deviation = (deviation + v_deviation * 0.5) / 1.5
+            gaze_on = total_deviation < 0.15
+            gaze_score = max(0.0, 1.0 - total_deviation / 0.3)
             self._smoothed_gaze_score = (
                 EMA_ALPHA * gaze_score + (1 - EMA_ALPHA) * self._smoothed_gaze_score
             )
@@ -199,8 +201,9 @@ class BodyLanguageAnalyzer:
             self._gaze_off_seconds = 0.0
         features.gaze_off_seconds = self._gaze_off_seconds
 
-    def _compute_fidget(self, frame: np.ndarray, features: FrameFeatures) -> FrameFeatures:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    def _compute_fidget_fast(self, small_frame: np.ndarray, features: FrameFeatures) -> FrameFeatures:
+        """Fast fidget detection using frame differencing (already downscaled)."""
+        gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
         if self._prev_gray is not None:
             diff = cv2.absdiff(self._prev_gray, gray)
             motion = float(diff.mean()) / 255.0

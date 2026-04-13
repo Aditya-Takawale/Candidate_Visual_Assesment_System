@@ -71,23 +71,23 @@ class AggregatedFeatures:
     is_warmed_up: bool = False
 
     # Identity
-    identity_score: float = 1.0
+    identity_score: float = 0.5     # neutral until verified
     identity_verified: bool = False
     identity_red_flags: int = 0
 
     # Body Language
-    gaze_score: float = 1.0        # 1.0 = perfect eye contact
-    posture_score: float = 1.0     # 1.0 = upright
-    fidget_score: float = 0.0      # 0.0 = no fidgeting
-    emotion_score: float = 1.0     # 1.0 = positive/neutral
+    gaze_score: float = 0.5         # neutral until measured
+    posture_score: float = 0.8      # slight benefit of doubt
+    fidget_score: float = 0.0       # 0.0 = no fidgeting
+    emotion_score: float = 0.5      # neutral
 
     # First Impression
     smile_ratio: float = 0.0
-    speech_energy_score: float = 1.0
-    punctuality_score: float = 1.0
+    speech_energy_score: float = 0.0 # must earn via actual speech
+    punctuality_score: float = 1.0   # on-time unless proven late
 
     # Grooming
-    grooming_score: float = 1.0
+    grooming_score: float = 0.5      # neutral until analysed
 
     # Red flags accumulated
     red_flags: List[RedFlag] = field(default_factory=list)

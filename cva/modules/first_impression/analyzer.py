@@ -65,7 +65,9 @@ class SmileDetector:
             return features
 
         import cv2
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Downscale aggressively — smile only needs lip landmarks
+        small = cv2.resize(frame, (160, 120), interpolation=cv2.INTER_AREA)
+        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
         result = self._face_mesh.process(rgb)
 
         if not result.multi_face_landmarks:
@@ -142,7 +144,12 @@ class SpeechAnalyzer:
                 audio = sd.rec(chunk_size, samplerate=self.SAMPLE_RATE, channels=1, dtype="float32")
                 sd.wait()
                 audio = audio.flatten()
-                rms = float(np.sqrt(np.mean(audio ** 2)))
+                # Guard against NaN/Inf from bad audio devices
+                audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
+                audio = np.clip(audio, -1.0, 1.0)
+                rms = float(np.sqrt(max(0.0, np.mean(audio.astype(np.float64) ** 2))))
+                if not np.isfinite(rms):
+                    rms = 0.0
                 self._rms = EMA_ALPHA * rms + (1 - EMA_ALPHA) * self._rms
                 self._speech_active = rms > SPEECH_RMS_THRESHOLD
 
