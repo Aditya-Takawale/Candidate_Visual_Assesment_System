@@ -15,9 +15,18 @@ from cva.config.settings import (
     GROOMING_INTERVAL,
     FIRST_IMPRESSION_DURATION,
     GROOMING_ENABLED,
+    CPU_IDENTITY_INTERVAL,
+    CPU_BODY_LANGUAGE_FRAME_STRIDE,
+    CPU_GROOMING_INTERVAL,
+    CPU_GROOMING_ENABLED,
+    APPLE_SILICON_IDENTITY_INTERVAL,
+    APPLE_SILICON_BODY_LANGUAGE_FRAME_STRIDE,
+    APPLE_SILICON_GROOMING_INTERVAL,
+    APPLE_SILICON_GROOMING_ENABLED,
 )
 from cva.common.models import ModuleStatus
 from cva.common.logger import get_logger
+from cva.common.hardware import get_runtime_profile
 
 logger = get_logger(__name__)
 
@@ -34,12 +43,37 @@ class ModuleScheduler:
         self._session_start = session_start_time or time.time()
         self._last_identity_run: float = 0.0
         self._last_grooming_run: float = 0.0
+        self._runtime_profile = get_runtime_profile()
+
+        if self._runtime_profile == "cpu":
+            self._identity_interval = CPU_IDENTITY_INTERVAL
+            self._grooming_interval = CPU_GROOMING_INTERVAL
+            self._body_language_stride = max(1, CPU_BODY_LANGUAGE_FRAME_STRIDE)
+            self._grooming_enabled = CPU_GROOMING_ENABLED
+        elif self._runtime_profile == "apple_silicon":
+            self._identity_interval = APPLE_SILICON_IDENTITY_INTERVAL
+            self._grooming_interval = APPLE_SILICON_GROOMING_INTERVAL
+            self._body_language_stride = max(1, APPLE_SILICON_BODY_LANGUAGE_FRAME_STRIDE)
+            self._grooming_enabled = APPLE_SILICON_GROOMING_ENABLED
+        else:
+            self._identity_interval = IDENTITY_INTERVAL
+            self._grooming_interval = GROOMING_INTERVAL
+            self._body_language_stride = 1
+            self._grooming_enabled = GROOMING_ENABLED
         self._status: Dict[str, ModuleStatus] = {
             "identity": ModuleStatus.WARMING_UP,
             "body_language": ModuleStatus.WARMING_UP,
             "first_impression": ModuleStatus.WARMING_UP,
             "grooming": ModuleStatus.WARMING_UP,
         }
+        logger.info(
+            "Scheduler runtime profile: %s | identity=%.1fs | body_stride=%s | grooming=%.1fs | grooming_enabled=%s",
+            self._runtime_profile,
+            self._identity_interval,
+            self._body_language_stride,
+            self._grooming_interval,
+            self._grooming_enabled,
+        )
 
     def should_run(self, module: str, frame_id: int, queue_depth: int = 0) -> bool:
         now = time.time()
@@ -50,7 +84,7 @@ class ModuleScheduler:
             if backpressure:
                 self._status["identity"] = ModuleStatus.SKIPPED
                 return False
-            should = (now - self._last_identity_run) >= IDENTITY_INTERVAL
+            should = (now - self._last_identity_run) >= self._identity_interval
             if should:
                 self._last_identity_run = now
             self._status["identity"] = ModuleStatus.ACTIVE if should else ModuleStatus.SKIPPED
@@ -60,8 +94,9 @@ class ModuleScheduler:
             if backpressure:
                 self._status["body_language"] = ModuleStatus.SKIPPED
                 return False
-            self._status["body_language"] = ModuleStatus.ACTIVE
-            return True
+            should = frame_id % self._body_language_stride == 0
+            self._status["body_language"] = ModuleStatus.ACTIVE if should else ModuleStatus.SKIPPED
+            return should
 
         if module == "first_impression":
             if elapsed_session > FIRST_IMPRESSION_DURATION:
@@ -74,13 +109,13 @@ class ModuleScheduler:
             return True
 
         if module == "grooming":
-            if not GROOMING_ENABLED:
+            if not self._grooming_enabled:
                 self._status["grooming"] = ModuleStatus.SKIPPED
                 return False
             if backpressure:
                 self._status["grooming"] = ModuleStatus.SKIPPED
                 return False
-            should = (now - self._last_grooming_run) >= GROOMING_INTERVAL
+            should = (now - self._last_grooming_run) >= self._grooming_interval
             if should:
                 self._last_grooming_run = now
             self._status["grooming"] = ModuleStatus.ACTIVE if should else ModuleStatus.SKIPPED

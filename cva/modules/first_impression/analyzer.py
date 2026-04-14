@@ -29,6 +29,24 @@ from cva.common.logger import get_logger
 
 logger = get_logger(__name__)
 
+# ── Module-level singletons — models loaded once, reused across sessions ─────
+_cached_smile_detector: Optional["SmileDetector"] = None
+_cached_speech_analyzer: Optional["SpeechAnalyzer"] = None
+
+
+def _get_smile_detector() -> "SmileDetector":
+    global _cached_smile_detector
+    if _cached_smile_detector is None:
+        _cached_smile_detector = SmileDetector()
+    return _cached_smile_detector
+
+
+def _get_speech_analyzer() -> "SpeechAnalyzer":
+    global _cached_speech_analyzer
+    if _cached_speech_analyzer is None:
+        _cached_speech_analyzer = SpeechAnalyzer()
+    return _cached_speech_analyzer
+
 
 class SmileDetector:
     """Detects smile using MediaPipe FaceMesh lip corner landmarks."""
@@ -43,6 +61,10 @@ class SmileDetector:
         self._mock = False
         self._load()
         self._smoothed_smile: float = 0.0
+
+    def reset(self) -> None:
+        """Reset EMA state for a new session (model stays loaded)."""
+        self._smoothed_smile = 0.0
 
     def _load(self) -> None:
         try:
@@ -123,8 +145,12 @@ class SpeechAnalyzer:
             self._mock = True
 
     def start(self) -> None:
-        if self._mock:
+        if self._mock or self._running:
             return
+        self._rms = 0.0
+        self._speech_active = False
+        self._last_speech_time = time.time()
+        self._pause_duration = 0.0
         self._running = True
         self._thread = threading.Thread(target=self._audio_loop, daemon=True)
         self._thread.start()
@@ -185,10 +211,12 @@ class FirstImpressionAnalyzer:
     def __init__(self, scheduled_start_time: Optional[float] = None):
         self._session_start: float = time.time()
         self._scheduled_start: float = scheduled_start_time or self._session_start
-        self._smile_detector = SmileDetector()
-        self._speech_analyzer = SpeechAnalyzer()
+        self._smile_detector = _get_smile_detector()
+        self._speech_analyzer = _get_speech_analyzer()
         self._active = True
         self._punctuality_flag: Optional[RedFlag] = None
+        # Reset model state for new session (EMA, etc.)
+        self._smile_detector.reset()
         self._speech_analyzer.start()
         self._check_punctuality()
 
@@ -250,4 +278,6 @@ class FirstImpressionAnalyzer:
         return flags
 
     def stop(self) -> None:
+        # Stop background audio thread; next session will restart it
         self._speech_analyzer.stop()
+        self._active = False

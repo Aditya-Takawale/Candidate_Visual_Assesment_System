@@ -26,6 +26,8 @@ let state = {
   shap: {},
   moduleScores: {},
   role: "developer",
+  cameraIndex: 0,
+  cameras: [],
 };
 
 let ws = null;
@@ -102,6 +104,9 @@ document.getElementById("app").innerHTML = `
           <option value="developer">Developer</option>
           <option value="sales">Sales</option>
           <option value="hr">HR</option>
+        </select>
+        <select id="camera-select" class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100 flex-shrink-0 min-w-[210px]">
+          <option value="0">Camera 0</option>
         </select>
         <button id="btn-start"
           class="flex-1 bg-sky-500 hover:bg-sky-600 text-white font-bold px-6 py-3 rounded-lg text-base transition-colors">
@@ -280,6 +285,36 @@ function setWsStatus(connected) {
   label.textContent = connected ? "Live — WebSocket connected" : "Disconnected";
 }
 
+async function loadCameras() {
+  const select = document.getElementById("camera-select");
+  if (!select) return;
+
+  try {
+    const res = await fetch(`${API_BASE}/devices/cameras`);
+    const data = await res.json();
+    const devices = data.devices || [];
+    state.cameras = devices;
+
+    if (!devices.length) {
+      select.innerHTML = '<option value="0">Default Camera</option>';
+      state.cameraIndex = 0;
+      return;
+    }
+
+    select.innerHTML = devices.map(device =>
+      `<option value="${device.index}">${escHtml(device.label)}</option>`
+    ).join("");
+
+    const preferredIndex = Number.isInteger(data.current_index) ? data.current_index : devices[0].index;
+    const matched = devices.some(device => device.index === preferredIndex) ? preferredIndex : devices[0].index;
+    select.value = String(matched);
+    state.cameraIndex = matched;
+  } catch (_) {
+    select.innerHTML = '<option value="0">Default Camera</option>';
+    state.cameraIndex = 0;
+  }
+}
+
 function renderScore(score) {
   if (!score) return;
   const val = score.final_score ?? 0;
@@ -413,7 +448,9 @@ function showDashboard() {
 
 document.getElementById("btn-start").addEventListener("click", async () => {
   const role = document.getElementById("role-select").value;
+  const cameraIndex = Number(document.getElementById("camera-select").value || 0);
   state.role = role;
+  state.cameraIndex = cameraIndex;
   state.redFlags = [];
   document.getElementById("flag-list").innerHTML = '<p class="text-slate-500 text-xs">No red flags detected.</p>';
   document.getElementById("flag-count").textContent = "0";
@@ -427,6 +464,7 @@ document.getElementById("btn-start").addEventListener("click", async () => {
       body: JSON.stringify({
         candidate_id: "demo_candidate",
         role,
+        camera_index: cameraIndex,
         aadhaar_name: aadhaarName || null,
         cv_name:      cvName      || null,
       }),
@@ -539,6 +577,7 @@ document.getElementById("btn-upload-aadhaar").addEventListener("click", async ()
   if (!_aadhaarImageB64) return;
 
   const manualName = document.getElementById("aadhaar-name").value.trim();
+  const cameraIndex = Number(document.getElementById("camera-select")?.value || 0);
   aadhaarStatus("Scanning document (OCR + face detection)...", "info");
   document.getElementById("btn-upload-aadhaar").disabled = true;
 
@@ -547,7 +586,7 @@ document.getElementById("btn-upload-aadhaar").addEventListener("click", async ()
     const startRes = await fetch(`${API_BASE}/session/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ candidate_id: "demo_candidate", role: "developer" }),
+      body: JSON.stringify({ candidate_id: "demo_candidate", role: "developer", camera_index: cameraIndex }),
     });
     const startData = await startRes.json();
     if (!startRes.ok) {
@@ -642,4 +681,5 @@ document.getElementById("btn-skip-aadhaar").addEventListener("click", () => {
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 connectWS();
+loadCameras();
 showLanding();

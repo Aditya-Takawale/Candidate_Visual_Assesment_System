@@ -83,6 +83,20 @@ class BodyLanguageAnalyzer:
             logger.warning("MediaPipe not installed — using mock body language analyzer.")
             self._mock = True
 
+    def reset(self) -> None:
+        """Reset per-session rolling state while reusing the loaded model."""
+        self._posture_baseline = None
+        self._baseline_samples = []
+        self._calibrated = False
+        self._gaze_off_start = None
+        self._gaze_off_seconds = 0.0
+        self._negative_emotion_start = None
+        self._negative_emotion_seconds = 0.0
+        self._prev_gray = None
+        self._fidget_window.clear()
+        self._smoothed_posture_angle = 0.0
+        self._smoothed_gaze_score = 1.0
+
     def process_frame(self, frame: np.ndarray, features: FrameFeatures) -> FrameFeatures:
         now = time.time()
 

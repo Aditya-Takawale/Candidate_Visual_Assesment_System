@@ -102,8 +102,11 @@ class SessionOrchestrator:
         # Reuse cached module instances (models loaded only once)
         self._identity = _get_identity()
         self._body_language = _get_body_language()
+        self._identity.reset_session()
+        self._body_language.reset()
         self._first_impression = FirstImpressionAnalyzer(scheduled_start_time=scheduled_start)
         self._grooming = _get_grooming()
+        self._grooming.reset()
         self._scorer = _get_scorer(role)
         self._store = get_feature_store()
 

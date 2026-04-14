@@ -29,6 +29,7 @@ from cva.config.settings import API_HOST, API_PORT, API_KEY, CORS_ORIGINS, DEFAU
 from cva.common.models import ScoringResult, SystemHealth
 from cva.common.hardware import get_primary_backend
 from cva.common.logger import get_logger
+from cva.ingestion.camera import get_camera_source, list_available_cameras, set_camera_source
 from cva.session.orchestrator import SessionOrchestrator
 
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -40,17 +41,32 @@ _ocr_lock   = threading.Lock()  # guards singleton initialization
 async def lifespan(app_: FastAPI):
     global _event_loop
     _event_loop = asyncio.get_running_loop()
-    # Pre-load all heavy models at startup so first session is instant
+    # Pre-load all heavy models at startup IN PARALLEL so first session is instant
     import time as _t
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     _t0 = _t.time()
-    logger.info("Pre-loading CV models...")
+    logger.info("Pre-loading CV models (parallel)...")
     from cva.session.orchestrator import (
         _get_identity, _get_body_language, _get_grooming, _get_scorer,
     )
-    _get_identity()
-    _get_body_language()
-    _get_grooming()
-    _get_scorer("developer")
+    from cva.modules.first_impression.analyzer import _get_smile_detector
+
+    loaders = {
+        "InsightFace": _get_identity,
+        "MediaPipe": _get_body_language,
+        "YOLOv8n": _get_grooming,
+        "XGBoost": lambda: _get_scorer("developer"),
+        "SmileDetector": _get_smile_detector,
+    }
+    with ThreadPoolExecutor(max_workers=len(loaders), thread_name_prefix="model-load") as pool:
+        futures = {pool.submit(fn): name for name, fn in loaders.items()}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                future.result()
+                logger.info(f"  {name} ready")
+            except Exception as e:
+                logger.warning(f"  {name} failed: {e}")
     logger.info(f"All models ready in {_t.time()-_t0:.1f}s")
     yield
 
@@ -77,6 +93,7 @@ _ws_clients: list[WebSocket] = []
 class StartSessionRequest(BaseModel):
     candidate_id: str = "candidate_001"
     role: str = DEFAULT_ROLE
+    camera_index: Optional[int] = None
     aadhaar_name: Optional[str] = None
     cv_name: Optional[str] = None
     scheduled_start: Optional[float] = None
@@ -86,6 +103,14 @@ class SessionResponse(BaseModel):
     session_id: str
     status: str
     hardware_backend: str
+    camera_index: int
+
+
+class CameraDeviceResponse(BaseModel):
+    index: int
+    label: str
+    width: int = 0
+    height: int = 0
 
 
 class ReferenceUploadRequest(BaseModel):
@@ -156,6 +181,14 @@ def api_health():
     return {"status": "ok", "hardware_backend": get_primary_backend(), "ts": time.time()}
 
 
+@app.get("/devices/cameras")
+def get_camera_devices(_: None = Depends(_require_api_key)):
+    return {
+        "devices": [CameraDeviceResponse(**device).model_dump() for device in list_available_cameras()],
+        "current_index": get_camera_source(),
+    }
+
+
 @app.post("/session/start", response_model=SessionResponse)
 def start_session(req: StartSessionRequest, _: None = Depends(_require_api_key)):
     global _session, _latest_score, _latest_health
@@ -163,6 +196,9 @@ def start_session(req: StartSessionRequest, _: None = Depends(_require_api_key))
         if _session is not None:
             _session.stop()
             _session = None
+
+        if req.camera_index is not None and not set_camera_source(req.camera_index):
+            raise HTTPException(status_code=400, detail=f"Could not open camera index {req.camera_index}.")
 
         _latest_score = None
         _latest_health = None
@@ -186,6 +222,7 @@ def start_session(req: StartSessionRequest, _: None = Depends(_require_api_key))
             session_id=_session.session_id,
             status="started",
             hardware_backend=get_primary_backend(),
+            camera_index=int(get_camera_source()),
         )
     except Exception as e:
         logger.error(f"Session start failed: {e}", exc_info=True)

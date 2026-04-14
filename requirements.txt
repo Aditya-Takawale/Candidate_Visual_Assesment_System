@@ -19,16 +19,20 @@ Pillow>=10.0.0
 # ── MediaPipe (pose, face mesh, hands) ───────────────────────────
 mediapipe==0.10.14
 
-# ── ONNX Runtime — GPU preferred, CPU fallback ────────────────────
-# GPU (NVIDIA CUDA):  onnxruntime-gpu  ← installed
-# CPU fallback:       onnxruntime
-# DirectML (Windows): onnxruntime-directml
-# CoreML (macOS):     onnxruntime-silicon
-onnxruntime-gpu==1.19.2
+# ── ONNX Runtime — platform-specific install path ─────────────────
+# Windows/Linux with NVIDIA GPU
+onnxruntime-gpu==1.19.2; platform_system != "Darwin"
+# Apple Silicon macOS
+onnxruntime-silicon>=1.19.2; platform_system == "Darwin" and platform_machine == "arm64"
+# Intel macOS fallback
+onnxruntime>=1.19.2; platform_system == "Darwin" and platform_machine != "arm64"
 
-# ── PyTorch with CUDA 12.1 (for YOLOv8 GPU inference) ─────────────
-# Install via: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-# CPU fallback installed by default via ultralytics — replace with above for GPU
+# ── PyTorch runtime notes (for YOLOv8 inference) ───────────────────
+# Windows/Linux + NVIDIA:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# Apple Silicon macOS:
+#   pip install torch torchvision
+# The runtime auto-selects cuda / mps / cpu based on availability.
 
 # ── Identity Verification ─────────────────────────────────────────
 insightface>=0.7.3

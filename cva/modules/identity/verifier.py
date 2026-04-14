@@ -43,6 +43,7 @@ class FaceEmbedder:
     def __init__(self):
         self._app = None
         self._mock = False
+        self._det_size = (640, 640)
         self._load()
 
     def _load(self) -> None:
@@ -55,11 +56,17 @@ class FaceEmbedder:
                 providers=providers,
                 allowed_modules=["detection", "recognition"],
             )
-            self._app.prepare(ctx_id=0 if "CUDAExecutionProvider" in providers else -1, det_size=(640, 640))
+            self._app.prepare(ctx_id=0 if "CUDAExecutionProvider" in providers else -1, det_size=self._det_size)
             logger.info("InsightFace loaded (buffalo_sc).")
         except Exception as e:
             logger.warning(f"InsightFace not available ({e}). Using mock embedder.")
             self._mock = True
+
+    def set_det_size(self, size: tuple) -> None:
+        """Switch detection grid size (smaller = faster for verification frames)."""
+        if self._app is not None and size != self._det_size:
+            self._det_size = size
+            self._app.prepare(ctx_id=0, det_size=size)
 
     def get_embedding(self, frame: np.ndarray, det_thresh: float = 0.5) -> Optional[np.ndarray]:
         """Returns face embedding vector or None if no face detected."""
@@ -113,15 +120,31 @@ class IdentityVerifier:
             self._name_match_checked = False
             logger.info("Reference image accepted (mock embedder — InsightFace not installed).")
             return True
+        # Use full resolution for enrollment (best quality embedding)
+        self._embedder.set_det_size((640, 640))
         embedding = self._embedder.get_embedding(reference_frame, det_thresh=det_thresh)
         if embedding is None:
             logger.warning("Could not extract reference embedding — no face found.")
             return False
+        self._embedding_buffer.clear()
+        self._smoothed_similarity = 0.5
+        self._red_flags = []
         self._reference_embedding = embedding
         self._reference_name = name
         self._name_match_checked = False  # invalidate cached name-match result
         logger.info("Reference face embedding set.")
         return True
+
+    def reset_session(self) -> None:
+        """Clear per-session rolling state so cached singleton starts clean."""
+        self._reference_embedding = None
+        self._embedding_buffer.clear()
+        self._smoothed_similarity = 0.5
+        self._red_flags = []
+        self._reference_name = None
+        self._cv_name = None
+        self._name_match_flag = None
+        self._name_match_checked = False
 
     def set_cv_name(self, name: str) -> None:
         self._cv_name = name
@@ -143,6 +166,8 @@ class IdentityVerifier:
             features.identity_verified = True
             return features
 
+        # Use smaller det grid for verification frames (faster; reference already set at 640)
+        self._embedder.set_det_size((320, 320))
         embedding = self._embedder.get_embedding(frame)
         if embedding is None:
             features.face_detected = False

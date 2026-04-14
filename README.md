@@ -62,6 +62,24 @@ Open **http://localhost:8000** in your browser.
 
 No manual selection required — auto-detected at startup.
 
+For Apple Silicon testers, the app now uses:
+- ONNX Runtime via `onnxruntime-silicon` for InsightFace where available
+- PyTorch `mps` for YOLOv8 grooming inference
+- Automatic fallback to CPU if Metal acceleration is unavailable
+
+Expected behaviour on macOS:
+- Apple Silicon: functionality should match closely, but speed will usually be below an RTX laptop
+- Intel Mac: works in CPU mode, but noticeably slower
+
+Apple Silicon runtime profile:
+- identity runs slightly less often than on CUDA
+- body-language analysis samples every 2 frames instead of every frame
+- grooming stays enabled, but runs less often and uses a smaller YOLO input size on MPS
+
+Install notes:
+- Windows/Linux with NVIDIA: install the CUDA PyTorch wheel
+- Apple Silicon Mac: `pip install torch torchvision` is sufficient for MPS
+
 ---
 
 ## Project Structure

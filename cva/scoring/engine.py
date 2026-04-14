@@ -87,21 +87,32 @@ class ScoringEngine:
             self._xgb_model = xgb.XGBRegressor()
             self._xgb_model.load_model(str(model_path))
             logger.info("XGBoost scoring model loaded (regressor).")
-            try:
-                import shap
-                self._shap_explainer = shap.TreeExplainer(self._xgb_model)
-                logger.info("SHAP explainer ready.")
-            except ImportError:
-                logger.warning("shap not installed — SHAP explanations disabled.")
+            # SHAP explainer is deferred to first score() call (~6s init)
         except ImportError:
             logger.warning("xgboost not installed — using rule-based fallback scoring.")
         except Exception as e:
             logger.warning(f"XGBoost model load error: {e} — using rule-based fallback.")
 
+    def _ensure_shap(self) -> None:
+        """Lazy-init SHAP explainer on first scoring call (avoids slow startup)."""
+        if self._shap_explainer is not None or self._xgb_model is None:
+            return
+        try:
+            import shap
+            self._shap_explainer = shap.TreeExplainer(self._xgb_model)
+            logger.info("SHAP explainer ready (deferred init).")
+        except ImportError:
+            logger.warning("shap not installed — SHAP explanations disabled.")
+        except Exception as e:
+            logger.debug(f"SHAP init error: {e}")
+
     def score(self, agg: AggregatedFeatures) -> Optional[ScoringResult]:
         """Returns ScoringResult or None if still in warmup phase."""
         if not agg.is_warmed_up:
             return None
+
+        # Lazy-init SHAP on first real scoring call (saves ~6s from startup)
+        self._ensure_shap()
 
         module_scores = _rule_based_score(agg, self._weights)
 

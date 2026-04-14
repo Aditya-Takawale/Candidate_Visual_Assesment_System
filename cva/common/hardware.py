@@ -40,6 +40,19 @@ def _cuda_available_torch() -> bool:
         return False
 
 
+def _mps_available_torch() -> bool:
+    """Check whether Apple Metal Performance Shaders is available."""
+    try:
+        import torch
+        return bool(
+            hasattr(torch.backends, "mps")
+            and torch.backends.mps.is_built()
+            and torch.backends.mps.is_available()
+        )
+    except Exception:
+        return False
+
+
 def _log_gpu_info() -> None:
     try:
         import torch
@@ -119,8 +132,30 @@ def get_primary_backend() -> str:
 
 
 def get_torch_device() -> str:
-    """Return 'cuda' if a CUDA GPU is available, else 'cpu'. Used by YOLOv8/ultralytics."""
-    return "cuda" if _cuda_available_torch() else "cpu"
+    """Return the best available torch device for YOLO/ultralytics."""
+    if _cuda_available_torch():
+        return "cuda"
+    if _mps_available_torch():
+        return "mps"
+    return "cpu"
+
+
+def is_cpu_only_backend() -> bool:
+    """True when the primary execution backend is CPU only."""
+    return get_primary_backend() == "CPU"
+
+
+def get_runtime_profile() -> str:
+    """Return a coarse runtime profile used for scheduler tuning."""
+    torch_device = get_torch_device()
+    backend = get_primary_backend()
+    if torch_device == "cuda" or backend == "CUDA (RTX)":
+        return "cuda"
+    if torch_device == "mps" or backend in {"CoreML (Metal)", "MPS (Metal)"}:
+        return "apple_silicon"
+    if backend == "CPU":
+        return "cpu"
+    return "balanced"
 
 
 def build_ort_session(model_path: str):

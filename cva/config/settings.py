@@ -44,6 +44,14 @@ BODY_LANGUAGE_INTERVAL = 0      # Continuous (every frame)
 FIRST_IMPRESSION_DURATION = 300 # Only during first N seconds of session
 GROOMING_INTERVAL = 15          # Run grooming every N seconds (relaxed for CPU)
 GROOMING_ENABLED = True
+CPU_IDENTITY_INTERVAL = float(os.getenv("CVA_CPU_IDENTITY_INTERVAL", "3.0"))
+CPU_BODY_LANGUAGE_FRAME_STRIDE = int(os.getenv("CVA_CPU_BODY_LANGUAGE_FRAME_STRIDE", "2"))
+CPU_GROOMING_INTERVAL = float(os.getenv("CVA_CPU_GROOMING_INTERVAL", "30.0"))
+CPU_GROOMING_ENABLED = os.getenv("CVA_CPU_GROOMING_ENABLED", "false").lower() == "true"
+APPLE_SILICON_IDENTITY_INTERVAL = float(os.getenv("CVA_APPLE_IDENTITY_INTERVAL", "2.5"))
+APPLE_SILICON_BODY_LANGUAGE_FRAME_STRIDE = int(os.getenv("CVA_APPLE_BODY_LANGUAGE_FRAME_STRIDE", "2"))
+APPLE_SILICON_GROOMING_INTERVAL = float(os.getenv("CVA_APPLE_GROOMING_INTERVAL", "20.0"))
+APPLE_SILICON_GROOMING_ENABLED = os.getenv("CVA_APPLE_GROOMING_ENABLED", "true").lower() == "true"
 
 # ─────────────────────────────────────────────
 # MULTI-FRAME AGGREGATION

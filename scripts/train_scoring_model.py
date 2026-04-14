@@ -4,6 +4,7 @@ Train XGBoost Regression scoring model for CVA.
 Predicts a continuous score 0–100 (not binary), trained on 50K
 synthetic samples covering every red-flag scenario with correlated
 feature distributions.  Evaluated with 5-fold CV, MAE, and R².
+Includes overfitting diagnostics (train-test gap, learning curve).
 
 Features (9):
   identity, gaze, posture, fidget_inv, emotion, smile,
@@ -181,6 +182,13 @@ add(2000, identity=0.83, gaze=0.78, posture=0.75, fidget=0.06,
 add(1500, identity=0.80, gaze=0.72, posture=0.72, fidget=0.08,
     emotion=0.45, smile=0.05, speech=0.12, grooming=0.68, punctuality=0.85)
 
+# Additional disengaged variants — model was scoring these too high (58.5)
+add(1500, identity=0.82, gaze=0.70, posture=0.70, fidget=0.04,
+    emotion=0.42, smile=0.02, speech=0.05, grooming=0.70, punctuality=0.90)
+
+add(1000, identity=0.85, gaze=0.75, posture=0.73, fidget=0.05,
+    emotion=0.40, smile=0.01, speech=0.03, grooming=0.72, punctuality=0.85)
+
 # ── RED FLAG: Casual attire (grooming) ──────────────────────────────────────
 add(2000, identity=0.85, gaze=0.80, posture=0.78, fidget=0.05,
     emotion=0.68, smile=0.45, speech=0.55, grooming=0.15, punctuality=0.95)
@@ -267,6 +275,14 @@ param_grid = [
     {"n_estimators": 600, "max_depth": 5, "learning_rate": 0.05,
      "subsample": 0.75, "colsample_bytree": 0.90, "min_child_weight": 3,
      "reg_alpha": 0.01, "reg_lambda": 0.5, "gamma": 0.05},
+    # Strong regularization — guards against overfitting on synthetic data
+    {"n_estimators": 700, "max_depth": 4, "learning_rate": 0.03,
+     "subsample": 0.70, "colsample_bytree": 0.75, "min_child_weight": 10,
+     "reg_alpha": 1.0, "reg_lambda": 5.0, "gamma": 0.5},
+    # Balanced depth + regularization — good generalization
+    {"n_estimators": 600, "max_depth": 5, "learning_rate": 0.04,
+     "subsample": 0.80, "colsample_bytree": 0.85, "min_child_weight": 6,
+     "reg_alpha": 0.3, "reg_lambda": 3.0, "gamma": 0.15},
 ]
 
 best_mae = float("inf")
@@ -330,10 +346,29 @@ mae  = mean_absolute_error(y_test, y_pred)
 rmse = _rmse_fn(y_test, y_pred)
 r2   = r2_score(y_test, y_pred)
 
+# Train set predictions for overfitting gap analysis
+y_pred_train = np.clip(model.predict(X_train), 0, 100)
+mae_train = mean_absolute_error(y_train, y_pred_train)
+rmse_train = _rmse_fn(y_train, y_pred_train)
+r2_train = r2_score(y_train, y_pred_train)
+
 print(f"\n── Test Set Results ─────────────────────────────────────────────────")
 print(f"  MAE:  {mae:.2f} points  (out of 100)")
 print(f"  RMSE: {rmse:.2f}")
 print(f"  R²:   {r2:.4f}")
+
+print(f"\n── Overfitting Diagnostics ──────────────────────────────────────────")
+print(f"  Train MAE:  {mae_train:.2f}  |  Test MAE:  {mae:.2f}  |  Gap: {mae - mae_train:.2f}")
+print(f"  Train RMSE: {rmse_train:.2f}  |  Test RMSE: {rmse:.2f}  |  Gap: {rmse - rmse_train:.2f}")
+print(f"  Train R²:   {r2_train:.4f}  |  Test R²:   {r2:.4f}  |  Gap: {r2_train - r2:.4f}")
+gap = mae - mae_train
+if gap > 2.0:
+    print(f"  ⚠ WARNING: Train-test gap of {gap:.2f} suggests possible overfitting!")
+    print(f"    Consider: increase min_child_weight, reduce max_depth, or add more data")
+elif gap < 0.5:
+    print(f"  ✓ Model generalises well (gap < 0.5)")
+else:
+    print(f"  ✓ Acceptable gap (0.5–2.0) — model fits well without overfitting")
 
 # Check accuracy on red-flag detection (score < 40 when should be low)
 low_mask  = y_test < 40
