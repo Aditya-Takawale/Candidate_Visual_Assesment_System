@@ -1,4 +1,9 @@
-﻿"""
+"""One-time helper script: writes the clean camera.py."""
+import ast
+from pathlib import Path
+
+CAMERA_SRC = '''\
+"""
 Shared webcam capture -- single instance, single reader thread.
 
 Design rules:
@@ -76,7 +81,7 @@ def _open_capture(index: int) -> Optional[cv2.VideoCapture]:
     """
     Open ONE capture for index.
     On Windows: tries DSHOW first (most compatible), then CAP_ANY.
-    Explicitly negotiates YUY2 format + 30fps so DSHOW doesn't start with
+    Explicitly negotiates YUY2 format + 30fps so DSHOW doesn\'t start with
     a garbage/unknown codec (which causes all-zero frames on some drivers).
     Returns None only if the device hard-refuses to open (isOpened=False).
     """
@@ -316,3 +321,9 @@ def list_available_cameras(max_devices: int = 10) -> list[dict]:
             "width": w, "height": h, "is_usb": False,
         })
     return results
+'''
+
+target = Path("cva/ingestion/camera.py")
+ast.parse(CAMERA_SRC)  # validate before writing
+target.write_text(CAMERA_SRC, encoding="utf-8", newline="\n")
+print("Written and syntax OK:", target)
