@@ -17,6 +17,7 @@ from typing import Optional, Deque
 from cva.config.settings import (
     GAZE_OFF_CAMERA_THRESHOLD_SEC,
     SLOUCH_ANGLE_THRESHOLD_DEG,
+    SLOUCH_ABSOLUTE_MAX_DEG,
     FIDGET_MOTION_THRESHOLD,
     FIDGET_WINDOW_SEC,
     NEGATIVE_EMOTION_THRESHOLD_SEC,
@@ -165,8 +166,13 @@ class BodyLanguageAnalyzer:
 
             baseline = self._posture_baseline if self._calibrated else 0.0
             deviation = abs(self._smoothed_posture_angle - baseline)
-            features.posture_angle_deg = deviation
-            features.posture_slouch = deviation > SLOUCH_ANGLE_THRESHOLD_DEG
+
+            # Absolute-tilt guard: if the head is persistently tilted beyond
+            # SLOUCH_ABSOLUTE_MAX_DEG, penalise even when the person calibrated
+            # from a slouched position (catches "slouching from the start" blind spot).
+            absolute_excess = max(0.0, self._smoothed_posture_angle - SLOUCH_ABSOLUTE_MAX_DEG)
+            features.posture_angle_deg = max(deviation, absolute_excess)
+            features.posture_slouch = features.posture_angle_deg > SLOUCH_ANGLE_THRESHOLD_DEG
         except Exception as e:
             logger.debug(f"Posture compute error: {e}")
 

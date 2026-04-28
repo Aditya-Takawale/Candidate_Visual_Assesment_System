@@ -8,17 +8,23 @@ Design rules:
   - CAP_PROP_BUFFERSIZE=1 prevents stale frames accumulating in the driver queue.
   - _open_capture validates with a live frame so black-frame DSHOW backends are rejected.
 """
+# pylint: disable=no-member          # cv2 is a C extension; Pylint cannot see its dynamic members
+# pylint: disable=global-statement   # module-level singletons are intentional design
+# pylint: disable=broad-exception-caught  # boundary camera code must catch all exceptions
+# pylint: disable=protected-access        # _make_dead_instance needs direct attribute init
+# pylint: disable=line-too-long           # long thread-start lines are intentional
 
 from __future__ import annotations
 
-import cv2
 import json
 import platform
 import subprocess
 import threading
 import time
-import numpy as np
 from typing import Optional
+
+import cv2
+import numpy as np
 
 from cva.config.settings import VIDEO_SOURCE, FRAME_WIDTH, FRAME_HEIGHT
 from cva.common.logger import get_logger
@@ -45,7 +51,7 @@ def _wmi_cameras() -> list[dict]:
         )
         r = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-            capture_output=True, text=True, timeout=8,
+            capture_output=True, text=True, timeout=8, check=False,
         )
         if r.returncode != 0 or not r.stdout.strip():
             return []
@@ -128,6 +134,7 @@ class SharedCamera:
         self._thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
+        """Start the background capture thread."""
         if self._running:
             return
         self._running = True
@@ -136,6 +143,7 @@ class SharedCamera:
         logger.info("Camera reader started.")
 
     def stop(self) -> None:
+        """Stop capture, join the reader thread, and release the device."""
         self._running = False
         if self._thread:
             self._thread.join(timeout=3)
@@ -146,6 +154,7 @@ class SharedCamera:
         logger.info("Camera released.")
 
     def read(self) -> tuple[bool, Optional[np.ndarray]]:
+        """Return (ok, frame) — frame is a copy of the latest grabbed frame."""
         with self._frame_lock:
             if self._latest_frame is None:
                 return False, None
@@ -153,14 +162,17 @@ class SharedCamera:
 
     @property
     def is_opened(self) -> bool:
+        """True if the underlying VideoCapture is still open."""
         return self._cap is not None and self._cap.isOpened()
 
     @property
     def source(self) -> int | str:
+        """Camera source index or device path."""
         return self._source
 
     @property
     def frame_id(self) -> int:
+        """Monotonically increasing capture frame counter."""
         with self._frame_lock:
             return self._frame_id
 
@@ -177,6 +189,7 @@ class SharedCamera:
             if frame.max() == 0:
                 continue
             resized = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
+            resized = cv2.flip(resized, 1)
             with self._frame_lock:
                 self._latest_frame = resized
                 self._frame_id    += 1
@@ -246,6 +259,7 @@ def release() -> None:
 
 
 def get_camera_source() -> int | str:
+    """Return the currently configured camera source index or path."""
     return _camera_source
 
 

@@ -15,6 +15,7 @@ from typing import Optional, List
 from cva.config.settings import (
     GROOMING_CONFIDENCE_THRESHOLD,
     GROOMING_INTERVAL,
+    GROOMING_UNCONFIRMED_SCORE,
     ETHNIC_WEAR_CLASSES,
     CASUAL_WEAR_CLASSES,
     MODELS_DIR,
@@ -80,9 +81,10 @@ class GroomingAnalyzer:
         self._last_run_time = time.time()
 
         if self._mock:
-            features.attire_class = "formal"
-            features.grooming_score = 0.9
-            self._last_result = {"attire_class": "formal", "grooming_score": 0.9}
+            # Model unavailable — cannot assess attire; return strict neutral (no free credit)
+            features.attire_class = "unassessed"
+            features.grooming_score = 0.50
+            self._last_result = {"attire_class": "unassessed", "grooming_score": 0.50}
             return features
 
         try:
@@ -117,11 +119,16 @@ class GroomingAnalyzer:
         Parse YOLO detections into attire class and grooming score.
         Ethnic wear is mapped to 'formal' — not flagged.
 
-        Note: COCO vocabulary has limited clothing classes ('tie' is the only
+        Formal wear requirement: a candidate must show a clear formal indicator
+        (tie, suit-jacket class if available) to receive a high grooming score.
+        Simply being visible (person class) is NOT enough — the system cannot confirm
+        formal attire from COCO alone, so it applies a mild penalty rather than
+        awarding credit that was not earned.
+
+        COCO vocabulary has limited clothing classes ('tie' is the only
         attire indicator). We use 'tie' as a formal signal, 'backpack' +
         'handbag' as neutral accessories, and absence of any clothing object
-        as 'undetected' (neutral). We avoid claiming casual detection from
-        classes that COCO was never trained on.
+        as 'undetected' (slight penalty — no formal confirmation).
         """
         detected_classes = []
         for result in results:
@@ -132,20 +139,28 @@ class GroomingAnalyzer:
                 if conf >= GROOMING_CONFIDENCE_THRESHOLD:
                     detected_classes.append(cls_name)
 
-        if not detected_classes:
-            return ("undetected", 0.5)  # no detections — neutral, no credit awarded
-
-        # COCO "tie" is a strong formal indicator
+        # COCO "tie" is the only strong formal indicator available
         if "tie" in detected_classes:
             return ("formal", 0.95)
 
-        # If we only see person/furniture/generic objects, we cannot determine attire
-        # Give a mild neutral score — grooming module is advisory in demo mode
-        person_detected = "person" in detected_classes
-        if person_detected:
-            return ("neutral", 0.65)  # person visible but attire indeterminate
+        # Ethnic formal wear — accepted as formal (e.g., person in kurta+dupatta)
+        for ethnic in ETHNIC_WEAR_CLASSES:
+            if ethnic in detected_classes:
+                return ("formal", 0.90)
 
-        return ("undetected", 0.55)  # generic COCO detections — cannot determine attire
+        # Confirmed casual — strong negative signal
+        for casual in CASUAL_WEAR_CLASSES:
+            if casual in detected_classes:
+                return (casual, 0.15)
+
+        # Person is visible but no formal indicator detected.
+        # Cannot confirm proper attire — apply a meaningful penalty so t-shirts
+        # and casual wear are not scored the same as a suit.
+        if "person" in detected_classes:
+            return ("unconfirmed", GROOMING_UNCONFIRMED_SCORE)
+
+        # Nothing relevant detected at all
+        return ("undetected", 0.40)
 
     def get_red_flags(self, features: FrameFeatures) -> List[RedFlag]:
         flags = []

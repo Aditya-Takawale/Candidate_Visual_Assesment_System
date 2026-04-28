@@ -74,6 +74,7 @@ class AggregatedFeatures:
     # Identity
     identity_score: float = 0.5     # neutral until verified
     identity_verified: bool = False
+    identity_reference_active: bool = False  # True once Aadhaar reference has been actively compared
     identity_red_flags: int = 0
 
     # Body Language
@@ -89,6 +90,7 @@ class AggregatedFeatures:
 
     # Grooming
     grooming_score: float = 0.5      # neutral until analysed
+    grooming_has_run: bool = False   # True once YOLO has produced at least one result
 
     # Red flags accumulated
     red_flags: List[RedFlag] = field(default_factory=list)
@@ -108,6 +110,8 @@ class ScoringResult:
     red_flags: List[RedFlag] = field(default_factory=list)
     score_reason: str = ""
     model_version: str = "demo-v1"
+    identity_reference_active: bool = False  # False = no Aadhaar uploaded; hide identity score on dashboard
+    grooming_has_run: bool = False           # False = YOLO hasn't produced a result yet
 
 
 @dataclass

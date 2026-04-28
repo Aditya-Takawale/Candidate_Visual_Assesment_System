@@ -339,7 +339,22 @@ function renderScore(score) {
     const key = mod.toLowerCase();
     const el  = document.getElementById(`mod-${key}-val`);
     const bar = document.getElementById(`mod-${key}-bar`);
-    if (el)  el.textContent = `${s.toFixed(0)}%`;
+
+    // Identity: hide score until Aadhaar is uploaded and actively compared
+    if (key === "identity" && !score.identity_reference_active) {
+      if (el)  { el.textContent = "—"; el.style.color = "#64748b"; }
+      if (bar) { bar.style.width = "0%"; bar.style.background = "#334155"; }
+      continue;
+    }
+
+    // Grooming: show a pending indicator until YOLO has produced its first result
+    if (key === "grooming" && !score.grooming_has_run) {
+      if (el)  { el.textContent = "…"; el.style.color = "#64748b"; }
+      if (bar) { bar.style.width = "0%"; bar.style.background = "#334155"; }
+      continue;
+    }
+
+    if (el)  { el.textContent = `${s.toFixed(0)}%`; el.style.color = ""; }
     if (bar) {
       bar.style.width = `${s}%`;
       bar.style.background = s >= 75 ? "#4ade80" : s >= 50 ? "#fbbf24" : "#f87171";

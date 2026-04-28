@@ -5,12 +5,16 @@ Session Orchestrator
 - Publishes results via asyncio queue for FastAPI WebSocket consumption
 - Tracks SystemHealth in real time
 """
+# pylint: disable=global-statement       # module-level CV-model singletons are intentional
+# pylint: disable=broad-exception-caught # per-module errors must not crash the pipeline
+# pylint: disable=protected-access       # _add_flag is an internal aggregator helper
+# pylint: disable=line-too-long          # long thread/log lines are intentional
 
 from __future__ import annotations
-import asyncio
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from queue import Queue, Empty
 from typing import Optional, Callable
 
@@ -120,6 +124,7 @@ class SessionOrchestrator:
     # ──────────────────────────────────────────
 
     def start(self) -> None:
+        """Start the camera sampler and processing loop."""
         self._running = True
         self._sampler.start()
         self._thread = threading.Thread(target=self._process_loop, daemon=True, name="cva-session")
@@ -127,6 +132,7 @@ class SessionOrchestrator:
         logger.info(f"Session '{self.session_id}' started. Backend: {self._health.hardware_backend}")
 
     def stop(self) -> None:
+        """Gracefully stop the session and release all resources."""
         self._running = False
         self._sampler.stop()
         self._first_impression.stop()
@@ -135,10 +141,12 @@ class SessionOrchestrator:
         logger.info(f"Session '{self.session_id}' stopped.")
 
     def set_reference_image(self, frame, det_thresh: float = 0.5) -> bool:
+        """Set the identity reference face from the provided frame."""
         return self._identity.set_reference(frame, det_thresh=det_thresh)
 
     def set_candidate_names(self, aadhaar_name: str, cv_name: str) -> None:
-        self._identity._reference_name = aadhaar_name
+        """Propagate Aadhaar and CV names to the identity verifier for name-match check."""
+        self._identity.set_reference_name(aadhaar_name)
         self._identity.set_cv_name(cv_name)
 
     # ──────────────────────────────────────────
@@ -146,8 +154,6 @@ class SessionOrchestrator:
     # ──────────────────────────────────────────
 
     def _process_loop(self) -> None:
-        from concurrent.futures import ThreadPoolExecutor
-
         pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="cva-mod")
 
         # Define module runners once — not inside the while loop
@@ -226,7 +232,7 @@ class SessionOrchestrator:
                         features.face_cosine_similarity = mod_feat.face_cosine_similarity
                         features.identity_verified = mod_feat.identity_verified
                         if name_flag:
-                            self._aggregator._add_flag(
+                            self._aggregator._add_flag(  # pylint: disable=protected-access
                                 name_flag.module, name_flag.reason,
                                 name_flag.severity, name_flag.confidence,
                             )
@@ -283,9 +289,10 @@ class SessionOrchestrator:
             if self._on_health:
                 self._on_health(self._health)
 
-        pool.shutdown(wait=False)
+        pool.shutdown(wait=True, cancel_futures=True)
 
     def _update_fps(self, fps: float) -> None:
+        """Update health metrics with the latest measured FPS."""
         self._measured_fps = fps
         self._health.fps = fps
 

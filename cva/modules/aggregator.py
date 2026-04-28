@@ -52,6 +52,8 @@ class MultiFrameAggregator:
             "punctuality_score": 1.0,    # On-time unless proven late
         }
 
+        self._identity_reference_active: bool = False  # set True when first cosine signal received
+        self._grooming_has_run: bool = False             # set True when YOLO first produces a result
         self._slouch_start: float = 0.0
         self._slouch_flagged = False
         self._gaze_off_start: float = 0.0
@@ -106,6 +108,7 @@ class MultiFrameAggregator:
             identity_score = self._remap_identity(f.face_cosine_similarity)
             # Identity should converge faster than other signals once a face is matched.
             self._ema_update("identity_score", identity_score, alpha=0.45)
+            self._identity_reference_active = True  # Aadhaar reference has been uploaded & compared
         elif not f.face_in_frame:
             # Face completely absent — drive identity toward 0
             self._ema_update("identity_score", 0.0)
@@ -138,7 +141,11 @@ class MultiFrameAggregator:
         self._ema_update("speech_energy_score", speech_val)
 
         if f.grooming_score is not None:
-            self._ema_update("grooming_score", f.grooming_score)
+            # Use higher alpha for grooming: it runs every 15s (low frequency),
+            # so EMA_ALPHA=0.15 would take many minutes to converge.
+            # alpha=0.50 makes the score reflect the 2 most recent YOLO runs.
+            self._ema_update("grooming_score", f.grooming_score, alpha=0.50)
+            self._grooming_has_run = True
 
     def _check_temporal_rules(self, f: FrameFeatures) -> None:
         now = time.time()
@@ -248,12 +255,19 @@ class MultiFrameAggregator:
         self._agg.is_warmed_up = self._frame_count >= WARMUP_FRAMES
 
         self._agg.identity_score = self._ema["identity_score"]
+        # Verified = reference was compared AND remapped EMA meets the threshold
+        self._agg.identity_verified = (
+            self._identity_reference_active
+            and self._ema["identity_score"] >= self._remap_identity(IDENTITY_COSINE_THRESHOLD)
+        )
+        self._agg.identity_reference_active = self._identity_reference_active
         self._agg.gaze_score = self._ema["gaze_score"]
         self._agg.posture_score = self._ema["posture_score"]
         self._agg.fidget_score = self._ema["fidget_score"]
         self._agg.smile_ratio = self._ema["smile_ratio"]
         self._agg.speech_energy_score = self._ema["speech_energy_score"]
         self._agg.grooming_score = self._ema["grooming_score"]
+        self._agg.grooming_has_run = self._grooming_has_run
         self._agg.punctuality_score = self._ema["punctuality_score"]
 
         body_language_score = (

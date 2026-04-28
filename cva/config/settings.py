@@ -2,6 +2,7 @@
 CVA System — Central Configuration
 All thresholds, paths, and flags are config-driven. Never hardcoded in modules.
 """
+# pylint: disable=line-too-long
 
 from __future__ import annotations
 import os
@@ -64,9 +65,12 @@ BASELINE_CALIBRATION_FRAMES = 5 * FPS_ACTIVE  # First N frames = baseline calibr
 # ─────────────────────────────────────────────
 # IDENTITY MODULE
 # ─────────────────────────────────────────────
-IDENTITY_COSINE_THRESHOLD = 0.40        # Below this = face mismatch red flag (relaxed for Aadhaar-vs-webcam)
-IDENTITY_MULTI_FRAME_COUNT = 5          # Average embeddings over N frames
+IDENTITY_COSINE_THRESHOLD = 0.60        # Below this = face mismatch red flag (strict: InsightFace same-person ~0.55–0.80)
+IDENTITY_MULTI_FRAME_COUNT = 10         # Average embeddings over N frames (more frames = more robust)
 IDENTITY_LIVENESS_ENABLED = True
+IDENTITY_MISMATCH_SCORE_CAP = 35        # Final score hard-cap when confirmed identity mismatch
+IDENTITY_OCCLUSION_DET_THRESH = 0.40   # Relaxed detection threshold for head coverings (turban, hijab, mask)
+IDENTITY_OCCLUSION_SIMILARITY_GRACE = 0.08  # Similarity grace when InsightFace det_score < 0.65 (partial occlusion)
 FUZZY_MATCH_THRESHOLD = 80              # RapidFuzz score below this = name mismatch
 
 # ─────────────────────────────────────────────
@@ -90,7 +94,10 @@ FILLER_WORDS = ["uh", "um", "er", "hmm", "like"]
 # ─────────────────────────────────────────────
 # GROOMING MODULE
 # ─────────────────────────────────────────────
-GROOMING_CONFIDENCE_THRESHOLD = 0.5
+GROOMING_CONFIDENCE_THRESHOLD = 0.30    # Lower threshold catches more clothing signals (was 0.5)
+GROOMING_UNCONFIRMED_SCORE = 0.35       # Score when person is visible but no formal indicator detected
+GROOMING_ABSOLUTE_SCORE_CAP = 50        # Final score cap when confirmed casual / unconfirmed attire
+SLOUCH_ABSOLUTE_MAX_DEG = 12.0          # Head tilt beyond this = slouch regardless of personal baseline
 ETHNIC_WEAR_CLASSES = [                 # Allowed formal ethnic wear (not flagged)
     "kurta", "saree", "sherwani", "salwar", "dhoti", "churidar"
 ]
@@ -100,6 +107,7 @@ CASUAL_WEAR_CLASSES = ["t-shirt", "hoodie", "tank-top", "shorts"]
 # SCORING ENGINE
 # ─────────────────────────────────────────────
 SCORING_INTERVAL_SEC = 8                # Recompute score every N seconds (more frames at low FPS)
+SHAP_REFRESH_INTERVAL_SEC = float(os.getenv("CVA_SHAP_REFRESH_INTERVAL_SEC", "15"))
 MODULE_WEIGHTS = {
     "identity": 0.20,
     "body_language": 0.40,

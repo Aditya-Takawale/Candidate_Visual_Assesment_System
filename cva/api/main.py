@@ -4,14 +4,18 @@ FastAPI Backend — CVA Demo Mode
 - WebSocket: streams live score + red flags + system health to dashboard
 - CORS enabled for dashboard on any origin (demo only)
 """
+# pylint: disable=no-member          # cv2 is a C extension; Pylint cannot see its dynamic members
+# pylint: disable=global-statement   # module-level singletons are intentional demo-mode design
+# pylint: disable=broad-exception-caught  # boundary error handlers must catch all exceptions
+# pylint: disable=line-too-long      # long f-strings/log messages are unavoidable here
 
 from __future__ import annotations
 import asyncio
 import base64
-import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -25,27 +29,36 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from cva.config.settings import API_HOST, API_PORT, API_KEY, CORS_ORIGINS, DEFAULT_ROLE, MAX_UPLOAD_BYTES
+from cva.config.settings import (
+    API_KEY, CORS_ORIGINS, DEFAULT_ROLE, MAX_UPLOAD_BYTES, FRAME_WIDTH, FRAME_HEIGHT,
+)
 from cva.common.models import ScoringResult, SystemHealth
 from cva.common.hardware import get_primary_backend
 from cva.common.logger import get_logger
 from cva.ingestion.camera import get_camera_source, list_available_cameras, set_camera_source
+from cva.ingestion.camera import get_capture as _get_capture
 from cva.session.orchestrator import SessionOrchestrator
 
+
+def _warm_scorer() -> None:
+    from cva.session.orchestrator import _get_scorer  # pylint: disable=import-outside-toplevel
+    scorer = _get_scorer("developer")
+    scorer.warmup_explainability()
+
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
-_ocr_reader = None          # EasyOCR singleton — initialized on first upload
+_ocr_reader = None  # pylint: disable=invalid-name  # EasyOCR singleton — initialized on first upload  # noqa: N816
 _ocr_lock   = threading.Lock()  # guards singleton initialization
 
 
 @asynccontextmanager
-async def lifespan(app_: FastAPI):
+async def lifespan(_: FastAPI):
+    """FastAPI lifespan: pre-load all heavy CV models in parallel before serving requests."""
     global _event_loop
     _event_loop = asyncio.get_running_loop()
     # Pre-load all heavy models at startup IN PARALLEL so first session is instant
-    import time as _t
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    _t0 = _t.time()
+    t0 = time.time()
     logger.info("Pre-loading CV models (parallel)...")
+    # pylint: disable=import-outside-toplevel
     from cva.session.orchestrator import (
         _get_identity, _get_body_language, _get_grooming, _get_scorer,
     )
@@ -55,7 +68,7 @@ async def lifespan(app_: FastAPI):
         "InsightFace": _get_identity,
         "MediaPipe": _get_body_language,
         "YOLOv8n": _get_grooming,
-        "XGBoost": lambda: _get_scorer("developer"),
+        "XGBoost": _warm_scorer,
         "SmileDetector": _get_smile_detector,
     }
     with ThreadPoolExecutor(max_workers=len(loaders), thread_name_prefix="model-load") as pool:
@@ -67,7 +80,7 @@ async def lifespan(app_: FastAPI):
                 logger.info(f"  {name} ready")
             except Exception as e:
                 logger.warning(f"  {name} failed: {e}")
-    logger.info(f"All models ready in {_t.time()-_t0:.1f}s")
+    logger.info(f"All models ready in {time.time()-t0:.1f}s")
     yield
 
 logger = get_logger(__name__)
@@ -90,7 +103,7 @@ _ws_clients: list[WebSocket] = []
 
 # ── Pydantic request/response schemas ─────────────────────────────────────────
 
-class StartSessionRequest(BaseModel):
+class StartSessionRequest(BaseModel):  # pylint: disable=missing-class-docstring
     candidate_id: str = "candidate_001"
     role: str = DEFAULT_ROLE
     camera_index: Optional[int] = None
@@ -99,14 +112,14 @@ class StartSessionRequest(BaseModel):
     scheduled_start: Optional[float] = None
 
 
-class SessionResponse(BaseModel):
+class SessionResponse(BaseModel):  # pylint: disable=missing-class-docstring
     session_id: str
     status: str
     hardware_backend: str
     camera_index: int
 
 
-class CameraDeviceResponse(BaseModel):
+class CameraDeviceResponse(BaseModel):  # pylint: disable=missing-class-docstring
     index: int
     label: str
     width: int = 0
@@ -135,12 +148,14 @@ def _require_api_key(x_api_key: Optional[str] = Header(None)) -> None:
 # ── Callbacks (called from orchestrator background thread) ────────────────────
 
 def _on_score(result: ScoringResult) -> None:
+    """Called from orchestrator thread when a new score is ready."""
     global _latest_score
     _latest_score = _serialise(asdict(result))
     _dispatch({"type": "score", "data": _latest_score})
 
 
 def _on_health(health: SystemHealth) -> None:
+    """Called from orchestrator thread when system health metrics update."""
     global _latest_health
     _latest_health = _serialise(asdict(health))
     _dispatch({"type": "health", "data": _latest_health})
@@ -153,6 +168,7 @@ def _dispatch(message: dict) -> None:
 
 
 async def _broadcast(message: dict) -> None:
+    """Send a JSON message to all connected WebSocket clients; prune dead connections."""
     dead = []
     for ws in _ws_clients:
         try:
@@ -178,11 +194,13 @@ def _serialise(obj):
 
 @app.get("/health")
 def api_health():
+    """Liveness probe — returns hardware backend name and current timestamp."""
     return {"status": "ok", "hardware_backend": get_primary_backend(), "ts": time.time()}
 
 
 @app.get("/devices/cameras")
 def get_camera_devices(_: None = Depends(_require_api_key)):
+    """List all detected camera devices and the currently active camera index."""
     return {
         "devices": [CameraDeviceResponse(**device).model_dump() for device in list_available_cameras()],
         "current_index": get_camera_source(),
@@ -191,6 +209,7 @@ def get_camera_devices(_: None = Depends(_require_api_key)):
 
 @app.post("/session/start", response_model=SessionResponse)
 def start_session(req: StartSessionRequest, _: None = Depends(_require_api_key)):
+    """Start a new interview session, stopping any active one first."""
     global _session, _latest_score, _latest_health
     try:
         if _session is not None:
@@ -226,11 +245,12 @@ def start_session(req: StartSessionRequest, _: None = Depends(_require_api_key))
         )
     except Exception as e:
         logger.error(f"Session start failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/session/stop")
 def stop_session(_: None = Depends(_require_api_key)):
+    """Gracefully stop the active session and release resources."""
     global _session
     if _session is None:
         raise HTTPException(status_code=404, detail="No active session.")
@@ -242,6 +262,7 @@ def stop_session(_: None = Depends(_require_api_key)):
 
 @app.get("/session/score")
 def get_latest_score(_: None = Depends(_require_api_key)):
+    """Return the most recently computed scoring result, or warming_up status."""
     if _latest_score is None:
         return {"status": "warming_up", "score": None}
     return {"status": "ok", "score": _latest_score}
@@ -249,6 +270,7 @@ def get_latest_score(_: None = Depends(_require_api_key)):
 
 @app.get("/session/health")
 def get_session_health(_: None = Depends(_require_api_key)):
+    """Return live system health metrics (FPS, module states, queue depth)."""
     if _session is None:
         return {"status": "no_session"}
     return asdict(_session.health)
@@ -257,7 +279,6 @@ def get_session_health(_: None = Depends(_require_api_key)):
 @app.post("/session/reference")
 async def upload_reference(data: ReferenceUploadRequest, _: None = Depends(_require_api_key)):
     """Legacy endpoint — kept for compatibility."""
-    global _session
     if _session is None:
         raise HTTPException(status_code=404, detail="No active session.")
     try:
@@ -272,7 +293,7 @@ async def upload_reference(data: ReferenceUploadRequest, _: None = Depends(_requ
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 def _get_ocr_reader():
@@ -280,8 +301,13 @@ def _get_ocr_reader():
     global _ocr_reader
     with _ocr_lock:
         if _ocr_reader is None:
-            import easyocr
-            _ocr_reader = easyocr.Reader(["en", "hi"], gpu=True, verbose=False)
+            import easyocr  # pylint: disable=import-error,import-outside-toplevel  # type: ignore[import-unresolved]
+            try:
+                import torch  # pylint: disable=import-outside-toplevel
+                use_gpu = bool(torch.cuda.is_available())
+            except Exception:
+                use_gpu = False
+            _ocr_reader = easyocr.Reader(["en", "hi"], gpu=use_gpu, verbose=False)
     return _ocr_reader
 
 
@@ -456,7 +482,6 @@ async def upload_aadhaar(data: AadhaarUploadRequest, _: None = Depends(_require_
     Body: { "image_b64": "<base64>", "manual_name": "<optional override>" }
     Returns: { "status", "name_detected", "face_detected", "name_used" }
     """
-    global _session
     if _session is None:
         raise HTTPException(status_code=404, detail="No active session.")
 
@@ -469,7 +494,7 @@ async def upload_aadhaar(data: AadhaarUploadRequest, _: None = Depends(_require_
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Image decode error: {e}")
+        raise HTTPException(status_code=400, detail=f"Image decode error: {e}") from e
 
     manual_name = (data.manual_name or "").strip()
     session_ref = _session  # capture reference before entering thread
@@ -487,8 +512,6 @@ async def upload_aadhaar(data: AadhaarUploadRequest, _: None = Depends(_require_
 
 
 # ── MJPEG Video Feed ──────────────────────────────────────────────────────────
-
-from cva.ingestion.camera import get_capture as _get_capture
 
 
 def _annotate_frame(frame: np.ndarray) -> np.ndarray:
@@ -510,7 +533,7 @@ def _annotate_frame(frame: np.ndarray) -> np.ndarray:
         score_val = _latest_score.get("final_score", 0)
         colour = (74, 222, 128) if score_val >= 75 else (251, 191, 36) if score_val >= 50 else (248, 113, 113)
         label = f"Score: {score_val:.0f}"
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+        (tw, _th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
         cv2.putText(frame, label, (w - tw - 10, 24),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, colour, 1, cv2.LINE_AA)
 
@@ -536,13 +559,13 @@ def _annotate_frame(frame: np.ndarray) -> np.ndarray:
 
 
 async def _mjpeg_generator():
+    """Async generator that yields MJPEG frames from the active camera."""
     _cam = _get_capture()
     while True:
         if _cam is None or not _cam.is_opened:
             _cam = _get_capture()
         if _cam is None:
             # Send a black placeholder frame
-            from cva.config.settings import FRAME_WIDTH, FRAME_HEIGHT
             blank = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
             cv2.putText(blank, "Camera not available", (int(FRAME_WIDTH * 0.2), FRAME_HEIGHT // 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 116, 139), 2)
@@ -566,6 +589,7 @@ async def _mjpeg_generator():
 
 @app.get("/video_feed")
 async def video_feed():
+    """MJPEG stream endpoint for live camera preview in the dashboard."""
     return StreamingResponse(
         _mjpeg_generator(),
         media_type="multipart/x-mixed-replace; boundary=frame",
@@ -576,6 +600,7 @@ async def video_feed():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint — pushes live score and health updates to the dashboard."""
     await websocket.accept()
     _ws_clients.append(websocket)
     logger.info(f"WebSocket client connected. Total: {len(_ws_clients)}")

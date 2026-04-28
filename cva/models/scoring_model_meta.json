@@ -1,0 +1,22 @@
+{
+  "mae_test": 1.3552,
+  "rmse_test": 1.8686,
+  "r2_test": 0.9947,
+  "mae_train": 1.0998,
+  "mae_gap": 0.2554,
+  "r2_train": 0.9967,
+  "r2_gap": 0.002,
+  "n_samples_train": 43424,
+  "n_estimators_used": 800,
+  "best_params": {
+    "n_estimators": 800,
+    "max_depth": 7,
+    "learning_rate": 0.02,
+    "subsample": 0.85,
+    "colsample_bytree": 0.8,
+    "min_child_weight": 8,
+    "reg_alpha": 0.5,
+    "reg_lambda": 2.0,
+    "gamma": 0.2
+  }
+}

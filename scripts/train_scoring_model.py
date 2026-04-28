@@ -13,6 +13,7 @@ Features (9):
 Run:  python scripts/train_scoring_model.py
 """
 import sys, os
+import json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
@@ -81,13 +82,15 @@ def make_row(
     ) * 100.0
 
     # Hard penalties for clear red-flag scenarios
-    if feat[0] < 0.40:  raw -= 20     # identity mismatch
+    if feat[0] < 0.50:  raw -= 30     # identity mismatch (clear — well below threshold)
+    elif feat[0] < 0.90: raw -= 18    # identity borderline — fails strict 0.60 cosine threshold
     if feat[1] < 0.30:  raw -= 15     # gaze off-camera
     if feat[2] < 0.30:  raw -= 12     # severe slouch
     if feat[3] < 0.40:  raw -= 10     # excessive fidgeting
     if feat[5] < 0.10:  raw -= 8      # never smiled
     if feat[6] < 0.15:  raw -= 8      # silence
-    if feat[7] < 0.30:  raw -= 12     # casual attire
+    if feat[7] < 0.50:  raw -= 18     # casual/unconfirmed attire (no formal indicator, e.g. t-shirt)
+    elif feat[7] < 0.70: raw -= 8     # borderline grooming (attire uncertain)
     if feat[8] < 0.20:  raw -= 10     # very late
 
     # Mild bonus for consistently excellent signals
@@ -195,7 +198,14 @@ add(2000, identity=0.85, gaze=0.80, posture=0.78, fidget=0.05,
 
 add(1500, identity=0.82, gaze=0.78, posture=0.75, fidget=0.07,
     emotion=0.62, smile=0.40, speech=0.50, grooming=0.10, punctuality=0.90)
+# ── RED FLAG: Unconfirmed attire (t-shirt / YOLO cannot confirm formal) ─────
+# Represents grooming_score ≈ 0.35 from "unconfirmed" YOLO label
+add(2500, identity=0.85, gaze=0.80, posture=0.78, fidget=0.05,
+    emotion=0.68, smile=0.45, speech=0.55, grooming=0.35, punctuality=0.95)
 
+add(2000, identity=0.82, gaze=0.78, posture=0.75, fidget=0.07,
+    emotion=0.62, smile=0.40, speech=0.50, grooming=0.35, punctuality=0.90,
+    noise=0.05)
 # ── RED FLAG: Very late (punctuality) ───────────────────────────────────────
 add(1500, identity=0.82, gaze=0.78, posture=0.76, fidget=0.06,
     emotion=0.65, smile=0.40, speech=0.55, grooming=0.78, punctuality=0.05)
@@ -255,8 +265,14 @@ print(f"  Score range: {y.min():.1f} – {y.max():.1f}")
 print(f"  Mean: {y.mean():.1f}  Std: {y.std():.1f}")
 print(f"  <30: {(y < 30).sum():,}  |  30-60: {((y >= 30) & (y < 60)).sum():,}  |  60-80: {((y >= 60) & (y < 80)).sum():,}  |  >80: {(y >= 80).sum():,}")
 
-X_train, X_test, y_train, y_test = train_test_split(
+# 3-way split: 70% train | 15% val (early stopping only) | 15% test (final holdout)
+# Using the holdout test set for early stopping leaks information into model selection;
+# the val set is kept strictly separate so the test set is a true held-out evaluation.
+X_temp, X_test, y_temp, y_test = train_test_split(
     X, y, test_size=0.15, random_state=42,
+)
+X_train, X_val, y_train, y_val = train_test_split(
+    X_temp, y_temp, test_size=0.176, random_state=42,  # 0.176 × 0.85 ≈ 15% of total
 )
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -333,7 +349,7 @@ model = xgb.XGBRegressor(
 
 model.fit(
     X_train, y_train,
-    eval_set=[(X_test, y_test)],
+    eval_set=[(X_val, y_val)],   # val set is separate from the final holdout (X_test)
     verbose=50,
 )
 
@@ -402,10 +418,95 @@ for name, feats in scenarios.items():
     print(f"  {name:<28} → {pred:5.1f}/100")
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Save
+# Learning curve  (bias–variance diagnostic)
+# ═════════════════════════════════════════════════════════════════════════════
+
+print(f"\n── Learning Curve (bias-variance check) ─────────────────────────────")
+lc_fracs       = [0.20, 0.40, 0.60, 0.80, 1.00]
+n_total_train  = len(X_train)
+lc_params      = {**best_params, "n_estimators": min(best_params["n_estimators"], 300)}
+lc_rng         = np.random.default_rng(0)
+for frac in lc_fracs:
+    n_lc   = max(200, int(n_total_train * frac))
+    idx_lc = lc_rng.choice(n_total_train, n_lc, replace=False)
+    lc_model = xgb.XGBRegressor(
+        objective="reg:squarederror", tree_method="hist",
+        random_state=42, verbosity=0, **lc_params,
+    )
+    lc_model.fit(X_train[idx_lc], y_train[idx_lc],
+                 eval_set=[(X_val, y_val)], verbose=False)
+    tr_mae  = mean_absolute_error(y_train[idx_lc],
+                                  np.clip(lc_model.predict(X_train[idx_lc]), 0, 100))
+    val_mae = mean_absolute_error(y_val,
+                                  np.clip(lc_model.predict(X_val), 0, 100))
+    lc_gap  = val_mae - tr_mae
+    status  = "⚠ overfit" if lc_gap > 2.5 else ("⚠ underfit" if tr_mae > 6.0 else "✓ ok")
+    print(f"  {int(frac*100):3d}% ({n_lc:>6,} samples)  "
+          f"train={tr_mae:.2f}  val={val_mae:.2f}  gap={lc_gap:+.2f}  {status}")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Hard gate — refuse to save a model that overfit or underfit
+# ═════════════════════════════════════════════════════════════════════════════
+
+_OVERFIT_GAP_MAX = 2.0   # max allowed MAE(test) - MAE(train)
+_R2_GAP_MAX      = 0.05  # max allowed R²(train) - R²(test)
+_UNDERFIT_R2_MIN = 0.85  # minimum acceptable R² on test set
+_MAE_MAX         = 5.0   # maximum acceptable test MAE
+
+r2_gap   = r2_train - r2
+problems = []
+if gap > _OVERFIT_GAP_MAX:
+    problems.append(f"overfit MAE gap too large  ({gap:.2f} > {_OVERFIT_GAP_MAX})")
+if r2_gap > _R2_GAP_MAX:
+    problems.append(f"overfit R² gap too large   (train-test={r2_gap:.4f} > {_R2_GAP_MAX})")
+if r2 < _UNDERFIT_R2_MIN:
+    problems.append(f"R² too low — underfitting  ({r2:.4f} < {_UNDERFIT_R2_MIN})")
+if mae > _MAE_MAX:
+    problems.append(f"test MAE too high          ({mae:.2f} > {_MAE_MAX}) — underfitting")
+
+print(f"\n── Model Validation Gate ────────────────────────────────────────────")
+if problems:
+    print(f"✗ MODEL REJECTED — not saved. Problems detected:")
+    for p in problems:
+        print(f"    • {p}")
+    print(f"\n  Fix overfit  → raise min_child_weight / reg_alpha / reg_lambda, lower max_depth")
+    print(f"  Fix underfit → lower regularization, raise n_estimators, or add more training data")
+    sys.exit(1)
+print(f"✓ All validation checks passed:")
+print(f"    MAE gap  = {gap:.2f}     (threshold ≤ {_OVERFIT_GAP_MAX})")
+print(f"    R² gap   = {r2_gap:.4f}  (threshold ≤ {_R2_GAP_MAX})")
+print(f"    Test R²  = {r2:.4f}   (threshold ≥ {_UNDERFIT_R2_MIN})")
+print(f"    Test MAE = {mae:.2f}     (threshold ≤ {_MAE_MAX})")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Save model + validation metadata sidecar
 # ═════════════════════════════════════════════════════════════════════════════
 
 out_path = MODELS_DIR / "scoring_model.json"
 model.save_model(str(out_path))
-print(f"\n✓ Model saved to: {out_path}")
-print(f"  File size: {out_path.stat().st_size / 1024:.0f} KB")
+
+n_est_used = (
+    int(model.best_iteration) + 1
+    if hasattr(model, "best_iteration")
+       and isinstance(model.best_iteration, (int, float))
+       and model.best_iteration >= 0
+    else best_params["n_estimators"]
+)
+meta = {
+    "mae_test":          round(float(mae), 4),
+    "rmse_test":         round(float(rmse), 4),
+    "r2_test":           round(float(r2), 4),
+    "mae_train":         round(float(mae_train), 4),
+    "mae_gap":           round(float(gap), 4),
+    "r2_train":          round(float(r2_train), 4),
+    "r2_gap":            round(float(r2_gap), 4),
+    "n_samples_train":   int(len(X_train)),
+    "n_estimators_used": n_est_used,
+    "best_params":       best_params,
+}
+meta_path = MODELS_DIR / "scoring_model_meta.json"
+with open(meta_path, "w", encoding="utf-8") as f:
+    json.dump(meta, f, indent=2)
+
+print(f"\n✓ Model saved to:    {out_path}  ({out_path.stat().st_size / 1024:.0f} KB)")
+print(f"✓ Metadata saved to: {meta_path}")

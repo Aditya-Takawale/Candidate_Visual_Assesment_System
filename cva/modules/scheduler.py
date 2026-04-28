@@ -5,6 +5,7 @@ Smart Module Scheduler
 - Priority order: Identity > Body Language > First Impression > Grooming
 - Tracks active/skipped/degraded module status for system health
 """
+# pylint: disable=line-too-long
 
 from __future__ import annotations
 import time
@@ -76,15 +77,16 @@ class ModuleScheduler:
         )
 
     def should_run(self, module: str, frame_id: int, queue_depth: int = 0) -> bool:
+        """Return True if the given module should execute on this frame."""
         now = time.time()
         elapsed_session = now - self._session_start
         backpressure = queue_depth >= BACKPRESSURE_QUEUE_THRESHOLD
 
         if module == "identity":
-            if backpressure:
-                self._status["identity"] = ModuleStatus.SKIPPED
-                return False
-            should = (now - self._last_identity_run) >= self._identity_interval
+            # Identity is security-critical; under backpressure we slow it down
+            # but do not disable it entirely.
+            interval = self._identity_interval * 2.0 if backpressure else self._identity_interval
+            should = (now - self._last_identity_run) >= interval
             if should:
                 self._last_identity_run = now
             self._status["identity"] = ModuleStatus.ACTIVE if should else ModuleStatus.SKIPPED
@@ -124,17 +126,22 @@ class ModuleScheduler:
         return False
 
     def mark_degraded(self, module: str) -> None:
+        """Mark a module as degraded (e.g., after repeated inference errors)."""
         self._status[module] = ModuleStatus.DEGRADED
         logger.warning(f"Module '{module}' marked as DEGRADED.")
 
     def get_active_modules(self):
+        """Return list of currently active module names."""
         return [m for m, s in self._status.items() if s == ModuleStatus.ACTIVE]
 
     def get_skipped_modules(self):
+        """Return list of currently skipped module names."""
         return [m for m, s in self._status.items() if s == ModuleStatus.SKIPPED]
 
     def get_degraded_modules(self):
+        """Return list of currently degraded module names."""
         return [m for m, s in self._status.items() if s == ModuleStatus.DEGRADED]
 
     def get_status(self) -> Dict[str, str]:
+        """Return a dict mapping module name to its current status string."""
         return {m: s.value for m, s in self._status.items()}
